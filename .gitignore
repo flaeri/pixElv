@@ -1,0 +1,6 @@
+﻿.vs
+*.avi
+*.mp4
+*.mov
+x64
+PixElv.vcxproj.user
