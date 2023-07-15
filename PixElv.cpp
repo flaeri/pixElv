@@ -47,11 +47,13 @@ std::mutex mtx;
 std::condition_variable cv;
 bool finished = false;
 std::atomic<bool> runFlag{ true };
+std::chrono::milliseconds threadTimeout(5000); // define a timeout of 1000 ms for thread timeout
 
 BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
     switch (ctrlType) {
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:
+        std::cout << "Finishing... Please wait 5 sec" << std::endl;
         finished = true;
         return TRUE;
     default:
@@ -354,6 +356,7 @@ void captureFrames(DxgiResources& resources, int runFor) {
 
             std::unique_lock<std::mutex> lock(mtx);
             cv.wait(lock, [] { return !frameQueue.isFull(); });
+            
             frameQueue.pushFrame(resources.mappedResource);
             cv.notify_all();
 
@@ -597,12 +600,14 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
 void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform, IMFTransform* pEncoder) {
     while (!finished || !frameQueue.empty()) {
         std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [] {return !frameQueue.empty(); });
-        FrameData frameData = frameQueue.popFrame();
-        cv.notify_all();
-        writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, pEncoder, streamIndex, framerate, isCompressed);
-        framesWritten++;
-        if (finished) { return; }
+        cv.wait_for(lock, threadTimeout, [] {return finished || !frameQueue.empty(); });
+        if (!frameQueue.empty()) {
+            FrameData frameData = frameQueue.popFrame();
+            cv.notify_all();
+            writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, pEncoder, streamIndex, framerate, isCompressed);
+            framesWritten++;
+        }
+        if (finished && frameQueue.empty()) { return; }
     }
 }
 
@@ -1037,15 +1042,21 @@ int main(int argc, char* argv[]) {
     std::thread captureThread(captureFrames, std::ref(resources), runFor);
     std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, pEncoder); //pTransform pEncoder
 
+    
     captureThread.join(); // rounds up the cap thread (stop)
     std::cout << "Capture ended!\n ------" << std::endl;
-    finished = true; // Notify writeThread that no more frames will be pushed into the queue
+    // Notify writeThread that no more frames will be pushed into the queue
+    if (!finished) { 
+        std::cout << "Finishing... Please wait 5 sec" << std::endl;
+        finished = true;
+    }
+    
     writeThread.join(); // rounds up the writer thread (stop)
 
     hr = pSinkWriter->Finalize();
     if (FAILED(hr))
     {
-        printError("finalize sinkWriter", hr);
+        printError("finalizing sinkWriter", hr);
         return -1;
     }
 
