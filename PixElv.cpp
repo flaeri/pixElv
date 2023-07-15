@@ -521,6 +521,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
                     return;
                 }
             }
+            if (finished) { return; }
         } while (hr == MF_E_NOTACCEPTING);
 
         // Get the transformed data
@@ -549,6 +550,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
                     return;
                 }
             }
+            if (finished) { return; }
         } while (hr == MF_E_NOTACCEPTING);
 
         hr = pEncoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
@@ -600,6 +602,7 @@ void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD str
         cv.notify_all();
         writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, pEncoder, streamIndex, framerate, isCompressed);
         framesWritten++;
+        if (finished) { return; }
     }
 }
 
@@ -864,14 +867,21 @@ int main(int argc, char* argv[]) {
     int runFor = 0;
     if (arguments.count("-frames") > 0) {
         runFor = std::atoi(arguments["-frames"].c_str());
+        if (runFor == 0) {
+            runFor = 12 * 60 * 60 * framerate; // 12 hours in frames
+        }
     }
     else if (arguments.count("-duration") > 0) {
         int duration = std::atoi(arguments["-duration"].c_str());
+        if (duration == 0) {
+            duration = 12 * 60 * 60; // 12 hours in seconds
+        }
         runFor = duration * framerate;
     }
     else {
-        runFor = 60; // default value if neither option is set (60fps * 5 sec = 300)
+        runFor = 300; // default value if neither option is set (60fps * 5 sec = 300)
     }
+
 
     // Set power state (dont sleep!)
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
@@ -1008,7 +1018,7 @@ int main(int argc, char* argv[]) {
     //std::cout << "Usage: " << resources.desc.Usage << std::endl;
     std::cout << "Width: " << resources.desc.Width << std::endl;
     std::cout << "Height: " << resources.desc.Height << std::endl;
-    //std::cout << "Format: " << resources.desc.Format << std::endl;
+    std::cout << "Format: " << resources.desc.Format << std::endl;
     std::cout << "Framerate: " << framerate << std::endl;
     std::cout << "Compression?: " << isCompressed << std::endl;
     std::cout << "\nHit ctrl+c to break early:" << std::endl;
@@ -1020,6 +1030,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to set control handler\n";
         return 1;
     }
+
+    if (finished) { return 0; }
 
     // spawn worker threads
     std::thread captureThread(captureFrames, std::ref(resources), runFor);
@@ -1043,7 +1055,6 @@ int main(int argc, char* argv[]) {
     std::cout << "\nDone! :)" << std::endl;
 
     // Release ME!
-    pEncoder->Release();
     resources.pDebugTexture->Release();
     resources.frame->Release();
     resources.desktopResource->Release();
