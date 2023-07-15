@@ -25,7 +25,7 @@ jobs:
         run: ./x64/Release/PixElv.exe -delay 0 -comp 1 -frames 15
 
       - name: Test Raw
-        run: ./x64/Release/PixElv.exe -delay 0 -comp 0 -frames 1
+        run: ./x64/Release/PixElv.exe -delay 0 -comp 0 -frames 2
 
       - name: upload
         uses: actions/upload-artifact@v3

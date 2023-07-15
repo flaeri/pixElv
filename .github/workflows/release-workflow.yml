@@ -1,0 +1,58 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  create_release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v1.1
+
+      - name: Build
+        run: msbuild PixElv.sln -t:rebuild -verbosity:minimal -property:Configuration=Release
+
+      - name: Test Compressed
+        run: ./x64/Release/PixElv.exe -delay 0 -comp 1 -frames 15
+
+      - name: Test Raw
+        run: ./x64/Release/PixElv.exe -delay 0 -comp 0 -frames 2
+
+      - name: Check if prerelease
+        id: prerelease
+        run: |
+          $tag = "${{ github.ref }}".replace('refs/tags/', '')
+          if ($tag -match 'alpha|beta') {
+            echo "PRERELEASE=true" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          } else {
+            echo "PRERELEASE=false" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          }
+        shell: pwsh
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: ${{ env.PRERELEASE }}
+
+      - name: Upload Release Asset
+        id: upload_release_asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./x64/Release/PixElv.exe
+          asset_name: PixElv-x64.exe
+          asset_content_type: application/octet-stream
