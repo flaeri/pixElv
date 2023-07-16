@@ -28,6 +28,7 @@
 #include <strmif.h>
 #include <wmcodecdsp.h>
 #include <mfobjects.h>
+#include <shared_mutex>
 
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "Kernel32.lib")
@@ -43,11 +44,11 @@
 
 #define CHECK_HR(hr) { if (FAILED(hr)) { std::cerr << "Failed at line " << __LINE__ << std::endl; return {}; } }
 
-std::mutex mtx;
-std::condition_variable cv;
+std::shared_mutex smtx;
+std::condition_variable_any cv;
 bool finished = false;
 std::atomic<bool> runFlag{ true };
-std::chrono::milliseconds threadTimeout(5000); // define a timeout of 1000 ms for thread timeout
+std::chrono::milliseconds threadTimeout(5000); // only used for panic if we hang/deadlock
 
 BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
     switch (ctrlType) {
@@ -113,6 +114,9 @@ public:
 
     size_t size() {
         return queue.size();
+    }
+    void swap(FrameQueue& other) {
+        std::swap(queue, other.queue);
     }
 };
 
@@ -274,9 +278,11 @@ bool acquireFrame(DxgiResources& resources) {
     }
 }
 
+int lastPrintedTs = -1;
 int framesWritten = 0;
-int maxQueueSize = 15;
+int maxQueueSize = 60; // 30 seems safe, ish. 60 works better, especially for 120fps
 FrameQueue frameQueue(maxQueueSize);
+FrameQueue privateCaptureQueue(maxQueueSize);
 
 bool isFirstSample = true;
 
@@ -324,7 +330,7 @@ void start_timer() {
     startTime = std::chrono::high_resolution_clock::now();
 }
 
-void stop_timer() {
+void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue) {
     auto stopTime = std::chrono::high_resolution_clock::now();
     auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(stopTime - startTime);
 
@@ -332,14 +338,22 @@ void stop_timer() {
     if (elapsedTime > maxTime) { maxTime = elapsedTime; }
 
     // If frames is a multiple of 60, print maxTime
-    if (framesWritten % 60 == 0) {
-        std::cout << "avgMax fGrab (ms): " << maxTime.count() << " TS: " << framesWritten / 60 << std::endl;
+    int ts = framesWritten / framerate;
+    if (ts > lastPrintedTs) {
+        std::cout << "avgMax fGrab (ms): " << maxTime.count() <<
+            " TS: " << ts <<
+            " pQueue : " << privateWriterFrameQueue <<  //assuming you want to print the size
+            " sQueue: " << sharedFrameQueue << std::endl; //assuming you want to print the size
+
         // Reset maxTime after printing
         maxTime = std::chrono::duration<double, std::milli>(0);
+
+        // Update last printed ts
+        lastPrintedTs = ts;
     }
 }
 
-void captureFrames(DxgiResources& resources, int runFor) {
+void captureFrames(DxgiResources& resources, int runFor, int framerate) {
     int framesCaptured = 0;
     while (framesCaptured < runFor) {
         if (acquireFrame(resources)) {
@@ -354,17 +368,46 @@ void captureFrames(DxgiResources& resources, int runFor) {
 
             resources.pContext->Unmap(resources.pDebugTexture, 0);
 
-            std::unique_lock<std::mutex> lock(mtx);
-            cv.wait(lock, [] { return !frameQueue.isFull(); });
-            
-            frameQueue.pushFrame(resources.mappedResource);
-            cv.notify_all();
-
+            privateCaptureQueue.pushFrame(resources.mappedResource);
             framesCaptured++;
-            stop_timer();
             if (finished) { return; }
         }
+
+        // Swap the queues when privateCaptureQueue is full OR when it has more than x frames and frameQueue is empty
+        if (privateCaptureQueue.isFull()) {
+            std::cerr << "Warning: privateCaptureQueue is full. Waiting for frameQueue to empty...\n";
+            bool swapped = false;
+            while (!swapped) {
+                std::unique_lock<std::shared_mutex> lock(smtx);
+                if (frameQueue.empty()) {
+                    frameQueue.swap(privateCaptureQueue);
+                    cv.notify_all(); // notify all waiting threads
+                    swapped = true;
+                }
+                else {
+                    lock.unlock(); // release the lock before sleeping
+                    // If not, sleep for a short period before checking again
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                }
+            }
+        }
+
+        else if (privateCaptureQueue.size() >= 20 && [&] {
+            std::shared_lock<std::shared_mutex> lock(smtx);
+                return frameQueue.empty();
+            }()) {
+            std::unique_lock<std::shared_mutex> lock(smtx);
+            frameQueue.swap(privateCaptureQueue);
+            cv.notify_all(); // notify all waiting threads
+        }
+        stop_timer(framerate, privateCaptureQueue.size(), frameQueue.size());
         if (finished) { return; }
+    }
+
+    // At the end of capturing, if there are any frames left in the private queue, swap them into the shared queue
+    if (!privateCaptureQueue.empty()) {
+        std::unique_lock<std::shared_mutex> lock(smtx);
+        frameQueue.swap(privateCaptureQueue);
     }
 
     std::cout << "Total frames captured: " << framesCaptured << std::endl;
@@ -599,13 +642,14 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
 
 void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform, IMFTransform* pEncoder) {
     while (!finished || !frameQueue.empty()) {
-        std::unique_lock<std::mutex> lock(mtx);
+        std::unique_lock<std::shared_mutex> lock(smtx);
         cv.wait_for(lock, threadTimeout, [] {return finished || !frameQueue.empty(); });
-        if (!frameQueue.empty()) {
+        while (!frameQueue.empty()) {
             FrameData frameData = frameQueue.popFrame();
-            cv.notify_all();
+            lock.unlock(); // unlock the mutex while writing the frame to disk
             writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, pEncoder, streamIndex, framerate, isCompressed);
             framesWritten++;
+            lock.lock(); // reacquire the lock before the next iteration
         }
         if (finished && frameQueue.empty()) { return; }
     }
@@ -931,22 +975,21 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    //CComPtr<IMFVideoProcessorControl> pControl;
     hr = pTransform->QueryInterface(IID_PPV_ARGS(&pVPC));
     if (FAILED(hr)) {
         std::cerr << "Failed to query IMFVideoProcessorControl";
         return -1;
     }
 
-    // Set mirror mode to vertical
-    hr = pVPC->SetMirror(isCompressed ? MIRROR_VERTICAL : MIRROR_NONE); //MIRROR_VERTICAL
+    // Set mirror mode to vertical if compressed, yuv wants to not be upside down
+    hr = pVPC->SetMirror(isCompressed ? MIRROR_VERTICAL : MIRROR_NONE);
     if (FAILED(hr)) {
         std::cerr << "Failed to set mirror mode";
         return -1;
     }
     pVPC->Release();
 
-    // pixfmt: 0=RGB24, 1=NV12, 2=H264, 3=ARGB32
+    // pixfmt: 0=RGB24, 1=YUY2, 2=H264, 3=ARGB32, 4=NV12
     CComPtr<IMFMediaType> INtransform = setupMediaType(resources.desc.Width, resources.desc.Height, 3, framerate);
     if (!INtransform) {
         std::cerr << "Failed to create media type IN";
@@ -1061,7 +1104,7 @@ int main(int argc, char* argv[]) {
     if (finished) { return 0; }
 
     // spawn worker threads
-    std::thread captureThread(captureFrames, std::ref(resources), runFor);
+    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate);
     std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, pEncoder); //pTransform pEncoder
 
     
