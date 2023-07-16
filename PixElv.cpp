@@ -374,21 +374,21 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     HRESULT hr;
     MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
 
+    CComPtr<IMFMediaBuffer> pInputBuffer;
+    hr = MFCreateMemoryBuffer(resources.desc.Width * resources.desc.Height * 4, &pInputBuffer);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to create memory buffer";
+        return;
+    }
+
     // Convert ARGB to RGB
-    unsigned char* rgbData = NULL;
+    /* unsigned char* rgbData = NULL;
     if (isCompressed) {
         rgbData = convertARGBtoRGBFlipped(frameData.data, resources.desc.Width, resources.desc.Height);
     }
     else {
         rgbData = convertARGBtoRGB(frameData.data, resources.desc.Width, resources.desc.Height);
-    }
-
-    CComPtr<IMFMediaBuffer> pInputBuffer;
-    hr = MFCreateMemoryBuffer(resources.desc.Width * resources.desc.Height * 3, &pInputBuffer);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create memory buffer";
-        return;
-    }
+    }*/
 
     BYTE* pBytes = NULL;
     DWORD maxLength = 0, currentLength = 0;
@@ -398,8 +398,8 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         return;
     }
 
-    std::memcpy(pBytes, rgbData, resources.desc.Width * resources.desc.Height * 3);
-    delete[] rgbData;
+    std::memcpy(pBytes, frameData.data, resources.desc.Width * resources.desc.Height * 4);
+    //delete[] rgbData;
 
     hr = pInputBuffer->Unlock();
     if (FAILED(hr)) {
@@ -407,7 +407,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         return;
     }
 
-    hr = pInputBuffer->SetCurrentLength(resources.desc.Width * resources.desc.Height * 3);
+    hr = pInputBuffer->SetCurrentLength(resources.desc.Width * resources.desc.Height * 4);
     if (FAILED(hr)) {
         std::cerr << "Failed to set buffer length";
         return;
@@ -438,7 +438,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
 
     // And an output buffer for that sample
     CComPtr<IMFMediaBuffer> pOutputBuffer;
-    hr = MFCreateMemoryBuffer(resources.desc.Width * resources.desc.Height * 2, &pOutputBuffer); // YUY2 is 2 bytes per pixel
+    hr = MFCreateMemoryBuffer(resources.desc.Width * resources.desc.Height * 4, &pOutputBuffer); // YUY2 is 2 bytes per pixel, nv12 =1.5
     if (FAILED(hr)) {
         std::cerr << "Failed to create output buffer";
         return;
@@ -484,6 +484,38 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         }
     }
 
+    outputDataBuffer = { 0, pOutputSample, 0, NULL };
+    DWORD status;
+
+    // first transform, RGB to YUY2
+
+    // you MUST use ProcessOutput to ask pTransform if its empty. Otherwise its going to think it still has data.
+    hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+    if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        std::cerr << "Failed at line " << __LINE__ << std::endl;
+        return;
+    }
+
+    do {
+        hr = pTransform->ProcessInput(0, pInputSample, 0);
+        if (hr == MF_E_NOTACCEPTING) {
+            // Not ready for input, attempt to process output
+            hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+            if (FAILED(hr)) {
+                std::cerr << "Failed at line " << __LINE__ << std::endl;
+                return;
+            }
+        }
+        if (finished) { return; }
+    } while (hr == MF_E_NOTACCEPTING);
+
+    // Get the transformed data
+    hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+    if (FAILED(hr)) {
+        std::cerr << "Failed at line " << __LINE__ << std::endl;
+        //return;
+    }
+
     if (isCompressed) {
         if (!isFirstSample) {
 
@@ -501,38 +533,6 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
             }
         }
         isFirstSample = false;  // Reset flag after setting initial values
-
-        outputDataBuffer = { 0, pOutputSample, 0, NULL };
-        DWORD status;
-
-        // first transform, RGB to YUY2
-
-        // you MUST use ProcessOutput to ask pTransform if its empty. Otherwise its going to think it still has data.
-        hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-        if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
-            std::cerr << "Failed at line " << __LINE__ << std::endl;
-            return;
-        }
-
-        do {
-            hr = pTransform->ProcessInput(0, pInputSample, 0);
-            if (hr == MF_E_NOTACCEPTING) {
-                // Not ready for input, attempt to process output
-                hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-                if (FAILED(hr)) {
-                    std::cerr << "Failed at line " << __LINE__ << std::endl;
-                    return;
-                }
-            }
-            if (finished) { return; }
-        } while (hr == MF_E_NOTACCEPTING);
-
-        // Get the transformed data
-        hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-        if (FAILED(hr)) {
-            std::cerr << "Failed at line " << __LINE__ << std::endl;
-            //return;
-        }
 
         // second transform, YUY2/NV12 to H264
         IMFSample* pSecondInputSample = outputDataBuffer.pSample;
@@ -584,7 +584,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         }
     }
     else {
-        pOutputSample = pInputSample;
+        pOutputSample = outputDataBuffer.pSample; //pInputSample
     }
 
     // Write the sample to disk
@@ -704,13 +704,19 @@ CComPtr<IMFMediaType> setupMediaType(int width, int height, int pixfmt, int fram
     // Choose format
     switch (pixfmt) {
     case 0:
-        format = MFVideoFormat_RGB24;
+        format = MFVideoFormat_RGB24; // {00000014-0000-0010-8000-00AA00389B71}
         break;
     case 1:
-        format = MFVideoFormat_YUY2; // YUY2 or NV12
+        format = MFVideoFormat_YUY2;
         break;
     case 2:
         format = MFVideoFormat_H264;
+        break;
+    case 3:
+        format = MFVideoFormat_ARGB32; // {00000015-0000-0010-8000-00AA00389B71}
+        break;
+    case 4:
+        format = MFVideoFormat_NV12;
         break;
     default:
         std::cerr << "Invalid pixel format specified";
@@ -891,6 +897,8 @@ int main(int argc, char* argv[]) {
     // Set power state (dont sleep!)
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
 
+    countdown(delay);
+
     // start work, DXGI
     DxgiResources resources = initializeDxgi(monitor);
 
@@ -909,6 +917,7 @@ int main(int argc, char* argv[]) {
     IMFTransform* pTransform = NULL;
     IMFTransform* pEncoder = NULL;
     CComPtr<ICodecAPI> pCodecAPI;
+    IMFVideoProcessorControl* pVPC = NULL;
 
     // Create the video processor MFT.
     hr = CoCreateInstance(
@@ -922,15 +931,30 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // pixfmt: 0=RGB24, 1=NV12, 2=H264
-    CComPtr<IMFMediaType> INtransform = setupMediaType(resources.desc.Width, resources.desc.Height, 0, framerate);
+    //CComPtr<IMFVideoProcessorControl> pControl;
+    hr = pTransform->QueryInterface(IID_PPV_ARGS(&pVPC));
+    if (FAILED(hr)) {
+        std::cerr << "Failed to query IMFVideoProcessorControl";
+        return -1;
+    }
+
+    // Set mirror mode to vertical
+    hr = pVPC->SetMirror(isCompressed ? MIRROR_VERTICAL : MIRROR_NONE); //MIRROR_VERTICAL
+    if (FAILED(hr)) {
+        std::cerr << "Failed to set mirror mode";
+        return -1;
+    }
+    pVPC->Release();
+
+    // pixfmt: 0=RGB24, 1=NV12, 2=H264, 3=ARGB32
+    CComPtr<IMFMediaType> INtransform = setupMediaType(resources.desc.Width, resources.desc.Height, 3, framerate);
     if (!INtransform) {
         std::cerr << "Failed to create media type IN";
         return -1;
     }
 
     // Set up the output media type for the sink writer
-    CComPtr<IMFMediaType> OUTtransform = setupMediaType(resources.desc.Width, resources.desc.Height, 1, framerate);
+    CComPtr<IMFMediaType> OUTtransform = setupMediaType(resources.desc.Width, resources.desc.Height, isCompressed ? 1 : 0, framerate);
     if (!OUTtransform) {
         std::cerr << "Failed to create media type OUT";
         return -1;
@@ -998,14 +1022,14 @@ int main(int argc, char* argv[]) {
     }
 
     DWORD streamIndex;
-    hr = pSinkWriter->AddStream(ENCout, &streamIndex);
+    hr = pSinkWriter->AddStream(isCompressed ? ENCout : OUTtransform, &streamIndex);
     if (FAILED(hr))
     {
         printError("AddStream", hr);
         return -1;
     }
 
-    hr = pSinkWriter->SetInputMediaType(streamIndex, ENCout, NULL);
+    hr = pSinkWriter->SetInputMediaType(streamIndex, isCompressed ? ENCout : OUTtransform, NULL);
     if (FAILED(hr)) {
         std::cerr << "Failed to set input media type on SinkWriter" << __LINE__ << std::endl;
         return 1;
@@ -1028,8 +1052,6 @@ int main(int argc, char* argv[]) {
     std::cout << "Compression?: " << isCompressed << std::endl;
     std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::cout << "\nCapture starting in:" << std::endl;
-
-    countdown(delay);
 
     if (!SetConsoleCtrlHandler(consoleCtrlHandler, TRUE)) {
         std::cerr << "Failed to set control handler\n";
