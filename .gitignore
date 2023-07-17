@@ -4,3 +4,4 @@
 *.mov
 x64
 PixElv.vcxproj.user
+git_info.h

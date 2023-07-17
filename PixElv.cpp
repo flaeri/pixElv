@@ -16,6 +16,7 @@
 #include <algorithm> // maffs
 #include <csignal> // ctrl+c
 #include <atomic>
+#include "git_info.h" // for git tag + hash
 
 //MF
 #include <mfapi.h>
@@ -898,6 +899,9 @@ HRESULT configureEncoderQuality(IMFTransform* pEncoder, int qp, int quality) {
 }
 
 int main(int argc, char* argv[]) {
+    std::cout << "Git Hash: " << GIT_HASH << std::endl;
+    std::cout << "Version: " << GIT_TAG << std::endl;
+
     auto arguments = parseArgs(argc, argv);
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
@@ -916,7 +920,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error generating output file path, exiting...\n";
         return 1;
     }
-    std::wcout << "Writing output to: " << outputFilePath.wstring() << std::endl;
+    std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
 
     // frames/duration
     int runFor = 0;
