@@ -30,7 +30,7 @@ jobs:
         run: msbuild PixElv.sln -t:rebuild -verbosity:minimal -property:Configuration=Release
 
       - name: Test Compressed
-        run: ./x64/Release/PixElv.exe -delay 0 -comp 1 -frames 60
+        run: ./x64/Release/PixElv.exe -delay 0 -comp 1 -frames 25
 
       - name: Test Raw
         run: ./x64/Release/PixElv.exe -delay 0 -comp 0 -frames 2

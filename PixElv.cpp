@@ -44,6 +44,13 @@
 
 
 #define CHECK_HR(hr) { if (FAILED(hr)) { std::cerr << "Failed at line " << __LINE__ << std::endl; return {}; } }
+template <typename T>
+void SafeRelease(T** ppT) {
+    if (*ppT) {
+        (*ppT)->Release();
+        *ppT = NULL;
+    }
+}
 
 std::shared_mutex smtx;
 std::condition_variable_any cv;
@@ -248,6 +255,51 @@ void printError(const char* functionName, HRESULT hr)
     LocalFree(lpMsgBuf);
 }
 
+IMFSample* createMediaSample(BYTE* data, DWORD cbData, const std::string& error_msg) {
+    HRESULT hr = S_OK;
+    IMFSample* pSample = NULL;
+    IMFMediaBuffer* pBuffer = NULL;
+
+    // Create a new media sample
+    hr = MFCreateSample(&pSample);
+
+    // Create a new memory buffer
+    if (SUCCEEDED(hr)) {
+        hr = MFCreateMemoryBuffer(cbData, &pBuffer);
+    }
+
+    // If data is provided, copy it into the buffer
+    if (SUCCEEDED(hr) && data != nullptr) {
+        BYTE* pBufferStart = NULL;
+        DWORD cbMaxLength = 0, cbCurrentLength = 0;
+
+        hr = pBuffer->Lock(&pBufferStart, &cbMaxLength, &cbCurrentLength);
+        if (SUCCEEDED(hr)) {
+            CopyMemory(pBufferStart, data, cbData);
+            hr = pBuffer->Unlock();
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pBuffer->SetCurrentLength(cbData);
+        }
+    }
+
+    // Add the buffer to the sample
+    if (SUCCEEDED(hr)) {
+        hr = pSample->AddBuffer(pBuffer);
+    }
+
+    // If anything failed, release any resources we have and return null
+    if (FAILED(hr)) {
+        std::cerr << "Failed to " << error_msg << "\n";
+        SafeRelease(&pSample);
+        pSample = NULL;
+    }
+
+    SafeRelease(&pBuffer);
+    return pSample;
+}
+
 bool acquireFrame(DxgiResources& resources) {
     // 34ms timeout essentially came from 60fps, 17*2
     HRESULT hr = resources.duplication->AcquireNextFrame(34, &(resources.frameInfo), &(resources.desktopResource));
@@ -384,82 +436,20 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate) {
 void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, IMFTransform* pEncoder, DWORD streamIndex, uint64_t framerate, bool isCompressed) {
     HRESULT hr;
     MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
+    
+    // Create the input sample
+    IMFSample* pInputSample = createMediaSample(
+        frameData.data,
+        resources.desc.Width * resources.desc.Height * 4, // RGBA 
+        "creating input sample"
+    );
 
-    CComPtr<IMFMediaBuffer> pInputBuffer;
-    hr = MFCreateMemoryBuffer(resources.desc.Width * resources.desc.Height * 4, &pInputBuffer);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create memory buffer";
-        return;
-    }
-
-    // Convert ARGB to RGB
-    /* unsigned char* rgbData = NULL;
-    if (isCompressed) {
-        rgbData = convertARGBtoRGBFlipped(frameData.data, resources.desc.Width, resources.desc.Height);
-    }
-    else {
-        rgbData = convertARGBtoRGB(frameData.data, resources.desc.Width, resources.desc.Height);
-    }*/
-
-    BYTE* pBytes = NULL;
-    DWORD maxLength = 0, currentLength = 0;
-    hr = pInputBuffer->Lock(&pBytes, &maxLength, &currentLength);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to lock buffer";
-        return;
-    }
-
-    std::memcpy(pBytes, frameData.data, resources.desc.Width * resources.desc.Height * 4);
-    //delete[] rgbData;
-
-    hr = pInputBuffer->Unlock();
-    if (FAILED(hr)) {
-        std::cerr << "Failed to unlock buffer";
-        return;
-    }
-
-    hr = pInputBuffer->SetCurrentLength(resources.desc.Width * resources.desc.Height * 4);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set buffer length";
-        return;
-    }
-
-    // Input
-    CComPtr<IMFSample> pInputSample;
-    hr = MFCreateSample(&pInputSample);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create sample";
-        return;
-    }
-
-    hr = pInputSample->AddBuffer(pInputBuffer);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to add buffer to sample";
-        return;
-    }
-
-    // output
-    CComPtr<IMFSample> pOutputSample;
-    // Prepare an output sample to receive the transformed data
-    hr = MFCreateSample(&pOutputSample);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create output sample";
-        return;
-    }
-
-    // And an output buffer for that sample
-    CComPtr<IMFMediaBuffer> pOutputBuffer;
-    hr = MFCreateMemoryBuffer(resources.desc.Width * resources.desc.Height * 4, &pOutputBuffer); // YUY2 is 2 bytes per pixel, nv12 =1.5
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create output buffer";
-        return;
-    }
-
-    hr = pOutputSample->AddBuffer(pOutputBuffer);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to add output buffer to sample";
-        return;
-    }
+    // Create the output sample
+    IMFSample* pOutputSample = createMediaSample(
+        nullptr,  // No data to copy
+        resources.desc.Width * resources.desc.Height * 4,
+        "creating output sample"
+    );
 
     if (isFirstSample) {
         // Convert frame rate to frame duration in seconds
@@ -510,8 +500,11 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         if (hr == MF_E_NOTACCEPTING) {
             // Not ready for input, attempt to process output
             hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
+            if (hr == MF_E_NOTACCEPTING || hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+                return;
+            }
             if (FAILED(hr)) {
-                std::cerr << "Failed at line " << __LINE__ << std::endl;
+                std::cerr << "Failed at line " << __LINE__ << " " << hr << std::endl;
                 return;
             }
         }
@@ -522,7 +515,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
     if (FAILED(hr)) {
         std::cerr << "Failed at line " << __LINE__ << std::endl;
-        //return;
+        return;
     }
 
     if (isCompressed) {
@@ -566,11 +559,13 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         } while (hr == MF_E_NOTACCEPTING);
 
         hr = pEncoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
-        if (FAILED(hr)) {
+        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+            // The encoder needs more input frames, skip writing to disk this time.
+            return;
+        } else if (FAILED(hr)) {
             std::cerr << "Failed at line " << __LINE__ << " | ";
-            //return; //dont worry about it :(
+            return;
         }
-
 
         if (!isFirstSample) {
             // Get the timestamp and duration from the output sample
@@ -584,25 +579,25 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
             llOutputSampleTime = llOutputSampleTime + llOutputSampleDuration;
         }
 
-        // outputDataBuffer.pSample now holds the output sample
-        pOutputSample = outputDataBuffer.pSample;
-
         // Dont care, release
         if (outputDataBuffer.pEvents) {
             outputDataBuffer.pEvents->Release();
         }
     }
-    else {
-        pOutputSample = outputDataBuffer.pSample; //pInputSample
-    }
 
     // Write the sample to disk
-    hr = pSinkWriter->WriteSample(streamIndex, pOutputSample);
-    if (FAILED(hr)) {
+    hr = pSinkWriter->WriteSample(streamIndex, outputDataBuffer.pSample);
+    if (hr == S_OK) {
+        framesWritten++;
+    }
+    else {
         std::cerr << "Failed to write sample" << std::endl;
         return;
     }
 
+    if (pInputSample != nullptr) {
+        pInputSample->Release();
+    }
     delete[] frameData.data;
 }
 
@@ -614,7 +609,6 @@ void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD str
             FrameData frameData = frameQueue.popFrame();
             lock.unlock(); // unlock the mutex while writing the frame to disk
             writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, pEncoder, streamIndex, framerate, isCompressed);
-            framesWritten++;
             lock.lock(); // reacquire the lock before the next iteration
         }
         if (finished && frameQueue.empty()) { return; }
