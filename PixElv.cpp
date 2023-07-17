@@ -287,39 +287,6 @@ FrameQueue privateCaptureQueue(maxQueueSize);
 
 bool isFirstSample = true;
 
-unsigned char* convertARGBtoRGB(unsigned char* argbData, int width, int height) {
-    unsigned char* rgbData = new unsigned char[width * height * 3];
-
-    for (int j = 0; j < width * height; j++) {
-        rgbData[j * 3] = argbData[j * 4];     // Red
-        rgbData[j * 3 + 1] = argbData[j * 4 + 1]; // Green
-        rgbData[j * 3 + 2] = argbData[j * 4 + 2]; // Blue
-    }
-
-    return rgbData;
-}
-
-unsigned char* convertARGBtoRGBFlipped(unsigned char* argbData, int width, int height) {
-    unsigned char* rgbData = new unsigned char[width * height * 3];
-
-    for (int j = 0; j < height; ++j) {
-        for (int i = 0; i < width; ++i) {
-            // Compute the index in the destination image
-            int dstIndex = ((height - j - 1) * width + i) * 3;
-
-            // Compute the index in the source image
-            int srcIndex = (j * width + i) * 4;
-
-            // Copy the RGB values
-            rgbData[dstIndex] = argbData[srcIndex];     // Red
-            rgbData[dstIndex + 1] = argbData[srcIndex + 1]; // Green
-            rgbData[dstIndex + 2] = argbData[srcIndex + 2]; // Blue
-        }
-    }
-
-    return rgbData;
-}
-
 LONGLONG llOutputSampleTime{};
 LONGLONG llOutputSampleDuration{};
 
@@ -530,8 +497,6 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
 
     outputDataBuffer = { 0, pOutputSample, 0, NULL };
     DWORD status;
-
-    // first transform, RGB to YUY2
 
     // you MUST use ProcessOutput to ask pTransform if its empty. Otherwise its going to think it still has data.
     hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);

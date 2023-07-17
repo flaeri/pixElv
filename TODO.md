@@ -13,3 +13,7 @@
 4. **Allow User-Set Queue Size:**
    - Enable users to set their preferred queue size. 
    - This should override the dynamically generated queue size.
+
+4. **Add help and version**
+   - `-help` should show the avaliable commands
+   - `-version` would only print the version
