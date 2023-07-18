@@ -433,7 +433,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate) {
     std::cout << "Total frames captured: " << framesCaptured << std::endl;
 }
 
-void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, IMFTransform* pEncoder, DWORD streamIndex, uint64_t framerate, bool isCompressed) {
+void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, DWORD streamIndex, uint64_t framerate, bool isCompressed) {
     HRESULT hr;
     MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
     
@@ -536,36 +536,6 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         }
         isFirstSample = false;  // Reset flag after setting initial values
 
-        // second transform, YUY2/NV12 to H264
-        IMFSample* pSecondInputSample = outputDataBuffer.pSample;
-
-        hr = pEncoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
-        if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
-            std::cerr << "Failed at line " << __LINE__ << std::endl;
-            return;
-        }
-
-        do {
-            hr = pEncoder->ProcessInput(0, pSecondInputSample, 0);
-            if (hr == MF_E_NOTACCEPTING) {
-                // Not ready for input, attempt to process output
-                hr = pEncoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
-                if (FAILED(hr)) {
-                    std::cerr << "Failed at line " << __LINE__ << std::endl;
-                    return;
-                }
-            }
-            if (finished) { return; }
-        } while (hr == MF_E_NOTACCEPTING);
-
-        hr = pEncoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
-        if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-            // The encoder needs more input frames, skip writing to disk this time.
-            return;
-        } else if (FAILED(hr)) {
-            std::cerr << "Failed at line " << __LINE__ << " | ";
-            return;
-        }
 
         if (!isFirstSample) {
             // Get the timestamp and duration from the output sample
@@ -601,14 +571,14 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     delete[] frameData.data;
 }
 
-void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform, IMFTransform* pEncoder) {
+void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform) {
     while (!finished || !frameQueue.empty()) {
         std::unique_lock<std::shared_mutex> lock(smtx);
         cv.wait_for(lock, threadTimeout, [] {return finished || !frameQueue.empty(); });
         while (!frameQueue.empty()) {
             FrameData frameData = frameQueue.popFrame();
             lock.unlock(); // unlock the mutex while writing the frame to disk
-            writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, pEncoder, streamIndex, framerate, isCompressed);
+            writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, streamIndex, framerate, isCompressed);
             lock.lock(); // reacquire the lock before the next iteration
         }
         if (finished && frameQueue.empty()) { return; }
@@ -701,7 +671,7 @@ CComPtr<IMFSinkWriter> setupSinkWriter(const std::wstring& outputFilePath, bool 
     return pSinkWriter;
 }
 
-CComPtr<IMFMediaType> setupMediaType(int width, int height, int pixfmt, int framerate) {
+CComPtr<IMFMediaType> setupMediaType(int width, int height, int pixfmt, int framerate, int bitrate) {
     HRESULT hr;
     GUID format;
 
@@ -777,84 +747,15 @@ CComPtr<IMFMediaType> setupMediaType(int width, int height, int pixfmt, int fram
         return nullptr;
     }
 
-    return pMediaTypeOut;
-}
-
-HRESULT setupEncoder(IMFTransform** ppEncoder) {
-    // Create the H.264 encoder MFT.
-    HRESULT hr = CoCreateInstance(
-        CLSID_CMSH264EncoderMFT,
-        NULL,
-        CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(ppEncoder)
-    );
+    if (bitrate) {
+    hr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
     if (FAILED(hr)) {
-        std::cerr << "Failed to create encoder MFT";
-        return hr;
-    }
-
-    return S_OK;
-}
-
-HRESULT configureEncoderQuality(IMFTransform* pEncoder, int qp, int quality) {
-    // Configure the H.264 encoder as desired
-    CComQIPtr<ICodecAPI> pCodecAPI(pEncoder);
-    if (!pCodecAPI)
-    {
-        std::cerr << "Failed to get ICodecAPI interface from encoder object." << std::endl;
-        return E_NOINTERFACE;
-    }
-
-    // Define VARIANT to set the desired value
-    VARIANT var{};;
-    var.vt = VT_UI4;
-
-    var.ulVal = eAVEncCommonRateControlMode_Quality;
-    HRESULT hr = pCodecAPI->SetValue(&CODECAPI_AVEncCommonRateControlMode, &var);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set encoder rate control mode to quality." << std::endl;
-        return hr;
-    }
-
-    var.ulVal = UINT32(80); // quality value. 0-100
-    if (quality) { var.ulVal = UINT32(quality); }
-    hr = pCodecAPI->SetValue(&CODECAPI_AVEncCommonQuality, &var); // dosent work it seems, at least for nvenc
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set encoder quality." << std::endl;
-        return hr;
-    }
-
-    if (qp) {
-        // QP, clamped to max 50
-        uint16_t defaultQP = std::min<uint16_t>(qp, 50);
-        uint16_t iFrameQP = std::min<uint16_t>(qp, 50);
-        uint16_t pFrameQP = std::min<uint16_t>(qp + 2, 50);
-        uint16_t bFrameQP = std::min<uint16_t>(qp + 4, 50);
-
-
-        // Create the 64-bit value.
-        ULONGLONG qpValue =
-            (ULONGLONG(defaultQP) << 0) |
-            (ULONGLONG(iFrameQP) << 16) |
-            (ULONGLONG(pFrameQP) << 32) |
-            (ULONGLONG(bFrameQP) << 48);
-
-        // Set the value.
-        var.vt = VT_UI8;
-        var.ullVal = qpValue;
-        hr = pCodecAPI->SetValue(&CODECAPI_AVEncVideoEncodeQP, &var);
-        if (FAILED(hr))
-        {
-            std::cerr << "Failed to set QP." << std::endl;
-            return hr;
+            std::cerr << "Failed to set MF_MT_INTERLACE_MODE\n";
+            return nullptr;
         }
     }
 
-    VariantClear(&var);
-
-    return S_OK;
+    return pMediaTypeOut;
 }
 
 int main(int argc, char* argv[]) {
@@ -869,9 +770,10 @@ int main(int argc, char* argv[]) {
     int framerate = arguments.count("-fps") > 0 ? strtoull(arguments["-fps"].c_str(), nullptr, 10) : 60; // MUST match monitor refresh rate
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
     bool isCompressed = arguments.count("-comp") > 0 ? std::atoi(arguments["-comp"].c_str()) > 0 : false; // h264 vs raw RGB24
-    int qp = arguments.count("-qp") > 0 ? strtoull(arguments["-qp"].c_str(), nullptr, 10) : 0;
-    int quality = arguments.count("-quality") > 0 ? strtoull(arguments["-quality"].c_str(), nullptr, 10) : 0;
+    int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
+    
+    bitrate = bitrate * 1000 * 1000; //bitrate specified in mbps
 
     //path
     std::filesystem::path outputFilePath;
@@ -900,7 +802,6 @@ int main(int argc, char* argv[]) {
         runFor = 300; // default value if neither option is set (60fps * 5 sec = 300)
     }
 
-
     // Set power state (dont sleep!)
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
 
@@ -917,13 +818,8 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // check avaliable encoders
-    //EnumerateEncoders();
-
     // Init transformers
     IMFTransform* pTransform = NULL;
-    IMFTransform* pEncoder = NULL;
-    CComPtr<ICodecAPI> pCodecAPI;
     IMFVideoProcessorControl* pVPC = NULL;
 
     // Create the video processor MFT.
@@ -953,70 +849,39 @@ int main(int argc, char* argv[]) {
     pVPC->Release();
 
     // pixfmt: 0=RGB24, 1=YUY2, 2=H264, 3=ARGB32, 4=NV12
-    CComPtr<IMFMediaType> INtransform = setupMediaType(resources.desc.Width, resources.desc.Height, 3, framerate);
-    if (!INtransform) {
+    CComPtr<IMFMediaType> ARBG = setupMediaType(resources.desc.Width, resources.desc.Height, 3, framerate, NULL);
+    if (!ARBG) {
         std::cerr << "Failed to create media type IN";
         return -1;
     }
 
-    // Set up the output media type for the sink writer
-    CComPtr<IMFMediaType> OUTtransform = setupMediaType(resources.desc.Width, resources.desc.Height, isCompressed ? 1 : 0, framerate);
-    if (!OUTtransform) {
+    CComPtr<IMFMediaType> NV12 = setupMediaType(resources.desc.Width, resources.desc.Height, 4, framerate, NULL);
+    if (!NV12) {
         std::cerr << "Failed to create media type OUT";
         return -1;
     }
 
-    // Set up the output media type for the transform
-    CComPtr<IMFMediaType> ENCout = setupMediaType(resources.desc.Width, resources.desc.Height, isCompressed ? 2 : 0, framerate);
-    if (!ENCout) {
-        std::cerr << "Failed to create transform output media type";
+    CComPtr<IMFMediaType> RGB = setupMediaType(resources.desc.Width, resources.desc.Height, 0, framerate, NULL);
+    if (!RGB) {
+        std::cerr << "Failed to create media type OUT";
         return -1;
     }
 
-    hr = pTransform->SetOutputType(0, OUTtransform, 0);
+    CComPtr<IMFMediaType> h264 = setupMediaType(resources.desc.Width, resources.desc.Height, 2, framerate, bitrate);
+    if (!h264) {
+        std::cerr << "Failed to create media type OUT";
+        return -1;
+    }
+
+    hr = pTransform->SetOutputType(0, isCompressed ? NV12 : RGB, 0);
     if (FAILED(hr)) {
         std::cerr << "Failed to set output type for transform" << __LINE__ << std::endl;
         return -1;
     }
 
-    hr = pTransform->SetInputType(0, INtransform, 0);
+    hr = pTransform->SetInputType(0, ARBG, 0);
     if (FAILED(hr)) {
         std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
-        return -1;
-    }
-
-    if (isCompressed) {
-        hr = setupEncoder(&pEncoder);
-        if (FAILED(hr)) {
-            // Handle error
-            return -1;
-        }
-
-        hr = configureEncoderQuality(pEncoder, qp, quality);
-        if (FAILED(hr)) {
-            // Handle error
-            return -1;
-        }
-
-        // ALWAYS output before input. Its fucked up :(
-        hr = pEncoder->SetOutputType(0, ENCout, 0);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to set output type for Encoder" << __LINE__ << std::endl;
-            return -1;
-        }
-
-        hr = pEncoder->SetInputType(0, OUTtransform, 0);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to set input type for encoder" << __LINE__ << std::endl;
-            return -1;
-        }
-
-        hr = configureEncoderQuality(pEncoder, qp, quality);
-        if (FAILED(hr)) {
-            // Handle error
-            return -1;
-        }
-
     }
 
     // PLEASE LET IT END
@@ -1028,14 +893,14 @@ int main(int argc, char* argv[]) {
     }
 
     DWORD streamIndex;
-    hr = pSinkWriter->AddStream(isCompressed ? ENCout : OUTtransform, &streamIndex);
+    hr = pSinkWriter->AddStream(isCompressed ? h264 : RGB, &streamIndex);
     if (FAILED(hr))
     {
         printError("AddStream", hr);
         return -1;
     }
 
-    hr = pSinkWriter->SetInputMediaType(streamIndex, isCompressed ? ENCout : OUTtransform, NULL);
+    hr = pSinkWriter->SetInputMediaType(streamIndex, isCompressed ? NV12 : RGB, NULL);
     if (FAILED(hr)) {
         std::cerr << "Failed to set input media type on SinkWriter" << __LINE__ << std::endl;
         return 1;
@@ -1068,7 +933,7 @@ int main(int argc, char* argv[]) {
 
     // spawn worker threads
     std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate);
-    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, pEncoder); //pTransform pEncoder
+    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform); //pTransform pEncoder
 
     
     captureThread.join(); // rounds up the cap thread (stop)
