@@ -518,42 +518,36 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         return;
     }
 
-    if (isCompressed) {
-        if (!isFirstSample) {
+    if (!isFirstSample) {
 
-            // Set the input sample timestamp and duration based on the output sample values
-            hr = pInputSample->SetSampleTime(llOutputSampleTime);
-            if (FAILED(hr)) {
-                std::cerr << "Failed to set sample time";
-                return;
-            }
-
-            hr = pInputSample->SetSampleDuration(llOutputSampleDuration);
-            if (FAILED(hr)) {
-                std::cerr << "Failed to set sample duration";
-                return;
-            }
-        }
-        isFirstSample = false;  // Reset flag after setting initial values
-
-
-        if (!isFirstSample) {
-            // Get the timestamp and duration from the output sample
-
-            hr = outputDataBuffer.pSample->GetSampleDuration(&llOutputSampleDuration);
-            if (FAILED(hr)) {
-                std::cerr << "Failed to get sample duration";
-                return;
-            }
-
-            llOutputSampleTime = llOutputSampleTime + llOutputSampleDuration;
+        // Set the input sample timestamp and duration based on the output sample values
+        hr = pInputSample->SetSampleTime(llOutputSampleTime);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to set sample time";
+            return;
         }
 
-        // Dont care, release
-        if (outputDataBuffer.pEvents) {
-            outputDataBuffer.pEvents->Release();
+        hr = pInputSample->SetSampleDuration(llOutputSampleDuration);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to set sample duration";
+            return;
         }
+
+        hr = outputDataBuffer.pSample->GetSampleDuration(&llOutputSampleDuration);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to get sample duration";
+            return;
+        }
+
+        llOutputSampleTime = llOutputSampleTime + llOutputSampleDuration;
     }
+    isFirstSample = false;  // Reset flag after setting initial values
+
+    // Dont care, release
+    if (outputDataBuffer.pEvents) {
+        outputDataBuffer.pEvents->Release();
+    }
+
 
     // Write the sample to disk
     hr = pSinkWriter->WriteSample(streamIndex, outputDataBuffer.pSample);
@@ -568,6 +562,11 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     if (pInputSample != nullptr) {
         pInputSample->Release();
     }
+
+    if (outputDataBuffer.pSample != nullptr) {
+        outputDataBuffer.pSample->Release();
+    }
+
     delete[] frameData.data;
 }
 
