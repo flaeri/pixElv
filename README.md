@@ -1,4 +1,5 @@
 # pixElv
+![image](https://github.com/flaeri/pixElv/assets/50419942/49e1d2b0-7c6f-4104-bb44-2cdf5c5fc9d0)
 
 PixElv (tries to be) a high-performance screen capture tool, leveraging the DXGI duplication functionality and hardware encoding support via on Media Foundation. The program is designed for efficient capture of raw and compressed output from your monitor, with an emphasis of *trying* to get all of the frames, which is quite a challenge.
 
