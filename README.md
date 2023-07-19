@@ -21,8 +21,7 @@ PixElv.exe -monitor [index] -fps [framerate] -delay [seconds] -comp [0 or 1] -qp
 -fps: Framerate for the output. This must match the monitor's refresh rate. Default is 60. Anythiung but 60 is untested, and unlikely to work well.
 -delay: Delay in seconds before starting capture. Default is 3 seconds.
 -comp: Set to 1 for compressed (H.264) output, 0 for raw RGB24 output. Default is raw output.
--qp: Quantization parameter for the encoder. QP takes precedence over quality if both set.
--quality: Quality setting for the encoder. Default, assuming no QP set. Defaults to 80 (0-100, higher = better quality and bigger file). About qp 22.
+-bitrate: Set the VBR bitrate in mbps, 30 = 30 mbps (which is the default)
 -frames: Number of frames to capture. In frames, obviously. 60 frames in a sec usually.
 -duration: Duration of capture in seconds. Multiplied by fps to determine the number of frames to capture. 
 ```
