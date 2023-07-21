@@ -237,24 +237,6 @@ DxgiResources initializeDxgi(int monitorIndex) {
     return resources;
 }
 
-void printError(const char* functionName, HRESULT hr)
-{
-    LPVOID lpMsgBuf;
-    DWORD dw = FormatMessage(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER |
-        FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS,
-        NULL,
-        hr,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR)&lpMsgBuf,
-        0, NULL);
-
-    std::cerr << functionName << " failed with error " << hr << ": " << (LPTSTR)lpMsgBuf << std::endl;
-
-    LocalFree(lpMsgBuf);
-}
-
 IMFSample* createMediaSample(BYTE* data, DWORD cbData, const std::string& error_msg) {
     HRESULT hr = S_OK;
     IMFSample* pSample = NULL;
@@ -488,6 +470,8 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     outputDataBuffer = { 0, pOutputSample, 0, NULL };
     DWORD status;
 
+    
+
     // you MUST use ProcessOutput to ask pTransform if its empty. Otherwise its going to think it still has data.
     hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
     if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
@@ -624,7 +608,6 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
 
     return true;
 }
-
 
 std::map<std::string, std::string> parseArgs(int argc, char* argv[]) {
     std::map<std::string, std::string> arguments;
@@ -893,9 +876,8 @@ int main(int argc, char* argv[]) {
 
     DWORD streamIndex;
     hr = pSinkWriter->AddStream(isCompressed ? h264 : RGB, &streamIndex);
-    if (FAILED(hr))
-    {
-        printError("AddStream", hr);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
         return -1;
     }
 
@@ -906,9 +888,8 @@ int main(int argc, char* argv[]) {
     }
 
     hr = pSinkWriter->BeginWriting();
-    if (FAILED(hr))
-    {
-        printError("BeginWriting", hr);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
         return -1;
     }
 
@@ -946,9 +927,8 @@ int main(int argc, char* argv[]) {
     writeThread.join(); // rounds up the writer thread (stop)
 
     hr = pSinkWriter->Finalize();
-    if (FAILED(hr))
-    {
-        printError("finalizing sinkWriter", hr);
+    if (FAILED(hr)) {
+        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
         return -1;
     }
 
