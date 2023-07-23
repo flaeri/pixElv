@@ -56,7 +56,7 @@ std::shared_mutex smtx;
 std::condition_variable_any cv;
 bool finished = false;
 std::atomic<bool> runFlag{ true };
-std::chrono::milliseconds threadTimeout(5000); // only used for panic if we hang/deadlock
+std::chrono::milliseconds threadTimeout(5000); // only used for panic if we hang/deadlock, or need 5 sec to finalize long queue
 
 BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
     switch (ctrlType) {
@@ -138,6 +138,7 @@ struct DxgiResources {
     D3D11_TEXTURE2D_DESC desc;
     ID3D11Texture2D* pDebugTexture;
     D3D11_MAPPED_SUBRESOURCE mappedResource;
+    UINT refreshRate;
 };
 
 void EnumerateEncoders() {
@@ -228,6 +229,45 @@ DxgiResources initializeDxgi(int monitorIndex) {
     resources.desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     resources.desc.BindFlags = 0;
     resources.desc.MiscFlags = 0;
+
+    // get refresh rate
+    DXGI_MODE_DESC1* displayModes = NULL;
+    UINT numModes = 0;
+    UINT flags = 0;
+
+    hr = output1->GetDisplayModeList1(resources.desc.Format, flags, &numModes, NULL);
+    CHECK_HR(hr);
+
+    displayModes = new DXGI_MODE_DESC1[numModes];
+    hr = output1->GetDisplayModeList1(resources.desc.Format, flags, &numModes, displayModes);
+    CHECK_HR(hr);
+
+    // Query IDXGIOutput2 or IDXGIOutput3 interface
+    IDXGIOutput3* output3 = NULL;
+    hr = output->QueryInterface(__uuidof(IDXGIOutput3), (void**)&output3);
+    CHECK_HR(hr);
+
+    // Prepare the desired mode description
+    DXGI_MODE_DESC1 desiredModeDesc = {};
+    desiredModeDesc.Format = resources.desc.Format;
+    desiredModeDesc.Width = resources.desc.Width;
+    desiredModeDesc.Height = resources.desc.Height;
+
+    // Find the closest matching mode
+    DXGI_MODE_DESC1 closestModeDesc;
+    hr = output3->FindClosestMatchingMode1(&desiredModeDesc, &closestModeDesc, resources.pDevice);
+    CHECK_HR(hr);
+
+    // The refresh rate is given as a rational number (Numerator / Denominator)
+    float refreshRate = static_cast<float>(closestModeDesc.RefreshRate.Numerator) / closestModeDesc.RefreshRate.Denominator;
+    UINT roundedRefreshRate = static_cast<UINT>(std::round(refreshRate));
+    resources.refreshRate = roundedRefreshRate;
+
+    wprintf(L"Refresh Rate: %d Hz\n", resources.refreshRate);
+
+    delete[] displayModes;
+    // end get refreshrate
+
     hr = resources.pDevice->CreateTexture2D(&(resources.desc), NULL, &(resources.pDebugTexture));
     CHECK_HR(hr);
 
@@ -612,7 +652,6 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
     return true;
 }
 
-
 std::map<std::string, std::string> parseArgs(int argc, char* argv[]) {
     std::map<std::string, std::string> arguments;
 
@@ -748,26 +787,26 @@ int main(int argc, char* argv[]) {
     std::cout << "Git Hash: " << GIT_HASH << std::endl;
     std::cout << "Version: " << GIT_TAG << std::endl;
 
+    
+
     auto arguments = parseArgs(argc, argv);
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     int monitor = arguments.count("-monitor") > 0 ? std::atoi(arguments["-monitor"].c_str()) : 0; // 0 indexed
     std::string path = arguments.count("-path") > 0 ? arguments["-path"] : ""; // blank/empty means it will be handeled by the function
-    int framerate = arguments.count("-fps") > 0 ? strtoull(arguments["-fps"].c_str(), nullptr, 10) : 60; // MUST match monitor refresh rate
+    int framerate = arguments.count("-fps") > 0 ? strtoull(arguments["-fps"].c_str(), nullptr, 10) : -1; // MUST match monitor refresh rate
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
     bool isCompressed = arguments.count("-comp") > 0 ? std::atoi(arguments["-comp"].c_str()) > 0 : false; // h264 vs raw RGB24
     int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
     
-    bitrate = bitrate * 1000 * 1000; //bitrate specified in mbps
+    // start work, DXGI
+    DxgiResources resources = initializeDxgi(monitor);
 
-    //path
-    std::filesystem::path outputFilePath;
-    if (!generateOutputPath(path, isCompressed, outputFilePath)) {
-        std::cerr << "Error generating output file path, exiting...\n";
-        return 1;
+    //framerate
+    if (framerate == -1) {
+        framerate = resources.refreshRate;
     }
-    std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
 
     // frames/duration
     int runFor = 0;
@@ -788,13 +827,21 @@ int main(int argc, char* argv[]) {
         runFor = 300; // default value if neither option is set (60fps * 5 sec = 300)
     }
 
+    // bitrate
+    bitrate = bitrate * 1000 * 1000; //bitrate specified in mbps
+
+    //path
+    std::filesystem::path outputFilePath;
+    if (!generateOutputPath(path, isCompressed, outputFilePath)) {
+        std::cerr << "Error generating output file path, exiting...\n";
+        return 1;
+    }
+    std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
+
     // Set power state (dont sleep!)
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
 
     countdown(delay);
-
-    // start work, DXGI
-    DxgiResources resources = initializeDxgi(monitor);
 
     // Start Media Foundation
     hr = MFStartup(MF_VERSION);
