@@ -787,8 +787,6 @@ int main(int argc, char* argv[]) {
     std::cout << "Git Hash: " << GIT_HASH << std::endl;
     std::cout << "Version: " << GIT_TAG << std::endl;
 
-    
-
     auto arguments = parseArgs(argc, argv);
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
@@ -797,10 +795,16 @@ int main(int argc, char* argv[]) {
     int framerate = arguments.count("-fps") > 0 ? strtoull(arguments["-fps"].c_str(), nullptr, 10) : -1; // MUST match monitor refresh rate
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
     bool isCompressed = arguments.count("-comp") > 0 ? std::atoi(arguments["-comp"].c_str()) > 0 : false; // h264 vs raw RGB24
+    bool version = (arguments.count("-version") > 0 || arguments.count("-v") > 0); // print ver and exit
     int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
     
-    // start work, DXGI
+    if (version) { return 0; }
+
+    std::cout << "\nDelay active. Starting in:" << std::endl;
+    countdown(delay);
+
+    // start work, DXGI. Has to be after countdown, due to context switch can happen during prepp.
     DxgiResources resources = initializeDxgi(monitor);
 
     //framerate
@@ -836,12 +840,17 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error generating output file path, exiting...\n";
         return 1;
     }
+
+    std::cout << "Width: " << resources.desc.Width << std::endl;
+    std::cout << "Height: " << resources.desc.Height << std::endl;
+    std::cout << "Format: " << resources.desc.Format << std::endl;
+    std::cout << "Framerate: " << framerate << std::endl;
+    std::cout << "Compression?: " << isCompressed << std::endl;
+    std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
 
     // Set power state (dont sleep!)
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
-
-    countdown(delay);
 
     // Start Media Foundation
     hr = MFStartup(MF_VERSION);
@@ -944,13 +953,6 @@ int main(int argc, char* argv[]) {
 
     // end media foundation prep
 
-    //std::cout << "Usage: " << resources.desc.Usage << std::endl;
-    std::cout << "Width: " << resources.desc.Width << std::endl;
-    std::cout << "Height: " << resources.desc.Height << std::endl;
-    std::cout << "Format: " << resources.desc.Format << std::endl;
-    std::cout << "Framerate: " << framerate << std::endl;
-    std::cout << "Compression?: " << isCompressed << std::endl;
-    std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::cout << "\nCapture starting in:" << std::endl;
 
     if (!SetConsoleCtrlHandler(consoleCtrlHandler, TRUE)) {
