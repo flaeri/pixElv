@@ -123,6 +123,9 @@ public:
     size_t size() {
         return queue.size();
     }
+    std::size_t getMaxSize() const {
+        return max_size;
+    }
     void swap(FrameQueue& other) {
         std::swap(queue, other.queue);
     }
@@ -355,9 +358,6 @@ bool acquireFrame(DxgiResources& resources) {
 
 int lastPrintedTs = -1;
 int framesWritten = 0;
-int maxQueueSize = 60; // 30 seems safe, ish. 60 works better, especially for 120fps
-FrameQueue frameQueue(maxQueueSize);
-FrameQueue privateCaptureQueue(maxQueueSize);
 
 bool isFirstSample = true;
 
@@ -395,8 +395,10 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
     }
 }
 
-void captureFrames(DxgiResources& resources, int runFor, int framerate) {
+void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
     int framesCaptured = 0;
+    int queueSize = frameQueue.getMaxSize();
+    int swapSize = queueSize/3;
     while (framesCaptured < runFor) {
         if (acquireFrame(resources)) {
             start_timer();
@@ -434,7 +436,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate) {
             }
         }
 
-        else if (privateCaptureQueue.size() >= 20 && [&] {
+        else if (privateCaptureQueue.size() >= swapSize && [&] {
             std::shared_lock<std::shared_mutex> lock(smtx);
                 return frameQueue.empty();
             }()) {
@@ -448,6 +450,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate) {
 
     // At the end of capturing, if there are any frames left in the private queue, swap them into the shared queue
     if (!privateCaptureQueue.empty()) {
+        std::cout << "capture done, swap remaning " << privateCaptureQueue.size() << " frames" << std::endl;
         std::unique_lock<std::shared_mutex> lock(smtx);
         frameQueue.swap(privateCaptureQueue);
     }
@@ -597,17 +600,18 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     delete[] frameData.data;
 }
 
-void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform) {
+void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
     while (!finished || !frameQueue.empty()) {
         std::unique_lock<std::shared_mutex> lock(smtx);
-        cv.wait_for(lock, threadTimeout, [] {return finished || !frameQueue.empty(); });
+        cv.wait_for(lock, threadTimeout, [&frameQueue] {return finished || !frameQueue.empty(); });
         while (!frameQueue.empty()) {
             FrameData frameData = frameQueue.popFrame();
             lock.unlock(); // unlock the mutex while writing the frame to disk
             writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, streamIndex, framerate, isCompressed);
             lock.lock(); // reacquire the lock before the next iteration
         }
-        if (finished && frameQueue.empty()) { return; }
+        if (finished && frameQueue.empty()) { 
+            return; }
     }
 }
 
@@ -807,10 +811,13 @@ int main(int argc, char* argv[]) {
     // start work, DXGI. Has to be after countdown, due to context switch can happen during prepp.
     DxgiResources resources = initializeDxgi(monitor);
 
-    //framerate
+    //framerate and queues
     if (framerate == -1) {
         framerate = resources.refreshRate;
     }
+    int maxQueueSize = framerate / 2; // 30 seems safe, ish. 60 works better, especially for 120fps.
+    FrameQueue frameQueue(maxQueueSize);
+    FrameQueue privateCaptureQueue(maxQueueSize);
 
     // frames/duration
     int runFor = 0;
@@ -963,8 +970,8 @@ int main(int argc, char* argv[]) {
     if (finished) { return 0; }
 
     // spawn worker threads
-    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate);
-    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform); //pTransform pEncoder
+    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue));
+    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, std::ref(frameQueue), std::ref(privateCaptureQueue)); //pTransform pEncoder
 
     
     captureThread.join(); // rounds up the cap thread (stop)
