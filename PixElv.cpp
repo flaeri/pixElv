@@ -547,6 +547,10 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         return;
     }
 
+    if (outputDataBuffer.pSample != nullptr) {
+        outputDataBuffer.pSample->Release();
+    }
+
     if (pInputSample != nullptr) {
         pInputSample->Release();
     }
