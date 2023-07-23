@@ -282,34 +282,6 @@ IMFSample* createMediaSample(BYTE* data, DWORD cbData, const std::string& error_
     return pSample;
 }
 
-void insertDataIntoSample(IMFSample* pSample, BYTE* data, DWORD cbData) {
-    HRESULT hr;
-    IMFMediaBuffer* pBuffer = NULL;
-
-    // Get the buffer from the sample.
-    hr = pSample->GetBufferByIndex(0, &pBuffer);
-    if (SUCCEEDED(hr)) {
-        BYTE* pBufferStart = NULL;
-        DWORD cbMaxLength = 0, cbCurrentLength = 0;
-
-        hr = pBuffer->Lock(&pBufferStart, &cbMaxLength, &cbCurrentLength);
-        if (SUCCEEDED(hr)) {
-            CopyMemory(pBufferStart, data, cbData);
-            hr = pBuffer->Unlock();
-        }
-
-        if (SUCCEEDED(hr)) {
-            hr = pBuffer->SetCurrentLength(cbData);
-        }
-
-        SafeRelease(&pBuffer);
-    }
-
-    if (FAILED(hr)) {
-        std::cerr << "Failed to insert data into sample\n";
-    }
-}
-
 bool acquireFrame(DxgiResources& resources) {
     // 34ms timeout essentially came from 60fps, 17*2
     HRESULT hr = resources.duplication->AcquireNextFrame(34, &(resources.frameInfo), &(resources.desktopResource));
@@ -443,34 +415,56 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate) {
     std::cout << "Total frames captured: " << framesCaptured << std::endl;
 }
 
-void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFSample* pInputSample, IMFSample* pOutputSample) {
-    HRESULT hr = 0;
+void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, DWORD streamIndex, uint64_t framerate, bool isCompressed) {
+    HRESULT hr;
     MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
     
-    // put frameData.data into pInputSample
-    insertDataIntoSample(pInputSample, frameData.data, resources.desc.Width * resources.desc.Height * 4);
-    if (FAILED(hr)) {
-        std::cerr << "Failed at line " << __LINE__ << " " << hr << std::endl;
-        return;
-    }
+    // Create the input sample
+    IMFSample* pInputSample = createMediaSample(
+        frameData.data,
+        resources.desc.Width * resources.desc.Height * 4, // RGBA 
+        "creating input sample"
+    );
 
-    // Convert frame rate to frame duration in seconds
-    double frameDurationSec = 1.0 / framerate;
+    // Create the output sample
+    IMFSample* pOutputSample = createMediaSample(
+        nullptr,  // No data to copy
+        resources.desc.Width * resources.desc.Height * 4,
+        "creating output sample"
+    );
 
-    // Convert frame duration from seconds to nanosecond units
-    LONGLONG llSampleDuration = static_cast<LONGLONG>(frameDurationSec * 10.0 * 1000 * 1000);
-    LONGLONG llSampleTime = static_cast<LONGLONG>(framesWritten * frameDurationSec * 10.0 * 1000 * 1000);
+    if (isFirstSample) {
+        // Convert frame rate to frame duration in seconds
+        double frameDurationSec = 1.0 / framerate;
 
-    hr = pInputSample->SetSampleTime(llSampleTime);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set sample time";
-        return;
-    }
+        // Convert frame duration from seconds to nanosecond units
+        LONGLONG llSampleDuration = static_cast<LONGLONG>(frameDurationSec * 10.0 * 1000 * 1000);
+        LONGLONG llSampleTime = static_cast<LONGLONG>(framesWritten * frameDurationSec * 10.0 * 1000 * 1000);
 
-    hr = pInputSample->SetSampleDuration(llSampleDuration);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set input sample duration";
-        return;
+        hr = pInputSample->SetSampleTime(llSampleTime);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to set sample time";
+            return;
+        }
+
+        hr = pInputSample->SetSampleDuration(llSampleDuration);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to set input sample duration";
+            return;
+        }
+
+        // Set the initial timestamp and duration for the first sample
+        hr = pOutputSample->SetSampleTime(llSampleTime);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to set sample time";
+            return;
+        }
+
+        hr = pOutputSample->SetSampleDuration(llSampleDuration);
+        if (FAILED(hr)) {
+            std::cerr << "Failed to set sample duration";
+            return;
+        }
     }
 
     outputDataBuffer = { 0, pOutputSample, 0, NULL };
@@ -506,9 +500,41 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         return;
     }
 
-    // Dont care, release
-    if (outputDataBuffer.pEvents) {
-        outputDataBuffer.pEvents->Release();
+    if (isCompressed) {
+        if (!isFirstSample) {
+
+            // Set the input sample timestamp and duration based on the output sample values
+            hr = pInputSample->SetSampleTime(llOutputSampleTime);
+            if (FAILED(hr)) {
+                std::cerr << "Failed to set sample time";
+                return;
+            }
+
+            hr = pInputSample->SetSampleDuration(llOutputSampleDuration);
+            if (FAILED(hr)) {
+                std::cerr << "Failed to set sample duration";
+                return;
+            }
+        }
+        isFirstSample = false;  // Reset flag after setting initial values
+
+
+        if (!isFirstSample) {
+            // Get the timestamp and duration from the output sample
+
+            hr = outputDataBuffer.pSample->GetSampleDuration(&llOutputSampleDuration);
+            if (FAILED(hr)) {
+                std::cerr << "Failed to get sample duration";
+                return;
+            }
+
+            llOutputSampleTime = llOutputSampleTime + llOutputSampleDuration;
+        }
+
+        // Dont care, release
+        if (outputDataBuffer.pEvents) {
+            outputDataBuffer.pEvents->Release();
+        }
     }
 
     // Write the sample to disk
@@ -521,22 +547,20 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         return;
     }
 
-    // I dont understand why this is sometimes crucial to have, and sometimes having it completely breaks everything...
-    /*if (outputDataBuffer.pSample != nullptr) {
-        outputDataBuffer.pSample->Release();
-    }*/
-
+    if (pInputSample != nullptr) {
+        pInputSample->Release();
+    }
     delete[] frameData.data;
 }
 
-void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform, IMFSample* pInputSample, IMFSample* pOutputSample) {
+void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform) {
     while (!finished || !frameQueue.empty()) {
         std::unique_lock<std::shared_mutex> lock(smtx);
         cv.wait_for(lock, threadTimeout, [] {return finished || !frameQueue.empty(); });
         while (!frameQueue.empty()) {
             FrameData frameData = frameQueue.popFrame();
             lock.unlock(); // unlock the mutex while writing the frame to disk
-            writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, streamIndex, framerate, isCompressed, pInputSample, pOutputSample);
+            writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, streamIndex, framerate, isCompressed);
             lock.lock(); // reacquire the lock before the next iteration
         }
         if (finished && frameQueue.empty()) { return; }
@@ -583,6 +607,7 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
 
     return true;
 }
+
 
 std::map<std::string, std::string> parseArgs(int argc, char* argv[]) {
     std::map<std::string, std::string> arguments;
@@ -841,24 +866,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
     }
 
-    // MediaTypes end
-
-    // Media samples
-
-    // Create the input sample
-    IMFSample* pInputSample = createMediaSample(
-        nullptr,
-        resources.desc.Width * resources.desc.Height * 4, // RGBA 
-        "creating input sample"
-    );
-
-    // Create the output sample
-    IMFSample* pOutputSample = createMediaSample(
-        nullptr,  // No data to copy
-        resources.desc.Width * resources.desc.Height * 4, //RGBA or NV12. Fix?
-        "creating output sample"
-    );
-    
+    // PLEASE LET IT END
 
     CComPtr<IMFSinkWriter> pSinkWriter = setupSinkWriter(outputFilePath.wstring(), isCompressed);
     if (!pSinkWriter) {
@@ -869,8 +877,7 @@ int main(int argc, char* argv[]) {
     DWORD streamIndex;
     hr = pSinkWriter->AddStream(isCompressed ? h264 : RGB, &streamIndex);
     if (FAILED(hr)) {
-        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
-        return -1;
+        std::cerr << "Failed at line: " << __LINE__ << std::endl;
     }
 
     hr = pSinkWriter->SetInputMediaType(streamIndex, isCompressed ? NV12 : RGB, NULL);
@@ -881,8 +888,7 @@ int main(int argc, char* argv[]) {
 
     hr = pSinkWriter->BeginWriting();
     if (FAILED(hr)) {
-        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
-        return -1;
+        std::cerr << "Failed at line: " << __LINE__ << std::endl;
     }
 
     // end media foundation prep
@@ -905,7 +911,7 @@ int main(int argc, char* argv[]) {
 
     // spawn worker threads
     std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate);
-    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, pInputSample, pOutputSample); //pTransform pEncoder
+    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform); //pTransform pEncoder
 
     
     captureThread.join(); // rounds up the cap thread (stop)
@@ -920,8 +926,7 @@ int main(int argc, char* argv[]) {
 
     hr = pSinkWriter->Finalize();
     if (FAILED(hr)) {
-        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
-        return -1;
+        std::cerr << "Failed at line: " << __LINE__ << std::endl;
     }
 
     //std::cout << "Timeouts: " << timeOutCounter << std::endl;
@@ -936,9 +941,6 @@ int main(int argc, char* argv[]) {
     resources.duplication->Release();
     resources.pContext->Release();
     resources.pDevice->Release();
-    if (pInputSample != nullptr) {
-        pInputSample->Release();
-    }
 
     MFShutdown();
     SetThreadExecutionState(ES_CONTINUOUS);
