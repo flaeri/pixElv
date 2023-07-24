@@ -1,17 +1,19 @@
 # pixElv
 ![image](https://github.com/flaeri/pixElv/assets/50419942/49e1d2b0-7c6f-4104-bb44-2cdf5c5fc9d0)
 
-PixElv (tries to be) a high-performance screen capture tool, leveraging the DXGI duplication functionality and hardware encoding support via on Media Foundation. The program is designed for efficient capture of raw and compressed output from your monitor, with an emphasis of *trying* to get all of the frames, which is quite a challenge.
+PixElv aspires to be a high-performance screen capture tool, although its success in this endeavor is not above questioning.
+It leverages DXGI duplication functionality and hardware encoding support via on Media Foundation. The program is designed for efficient capture of raw and compressed output from your monitor, with an emphasis of *trying* to get all of the frames, which is quite a challenge.
 
 ## Features
 - Screen capture using DXGI monitor duplication
 - Output in raw (B8G8R8A8_UNORM (RGB24) with stripped alpha) and compressed formats (h264, nv12)
-- Hardware encoder support using Media Foundation (milage may vary)
+- Hardware encoder support using Media Foundation (milage may vary). 
+  - AMF and NVENC have been tested and confirmed to work.
 
 ## Usage
 
 ```shell
-PixElv.exe -monitor [index] -fps [framerate] -delay [seconds] -comp [0 or 1] -qp [value] -quality [value] -frames [number] -duration [seconds] -path [output path]
+PixElv.exe -monitor [index] -fps [framerate] -delay [seconds] -comp [0 or 1] -frames [number] -duration [seconds] -bitrate [mbps] -path [output path]
 ```
 
 ## Parameters
