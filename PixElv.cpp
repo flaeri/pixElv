@@ -1,3 +1,5 @@
+#include "arg_parser.h"
+
 #include <d3d11.h>
 #include <dxgi1_4.h>
 #include <dxgi.h>
@@ -30,6 +32,9 @@
 #include <wmcodecdsp.h>
 #include <mfobjects.h>
 #include <shared_mutex>
+
+//args
+
 
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "Kernel32.lib")
@@ -664,21 +669,6 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
     return true;
 }
 
-std::map<std::string, std::string> parseArgs(int argc, char* argv[]) {
-    std::map<std::string, std::string> arguments;
-
-    for (int i = 1; i < argc; i += 2) {
-        if (i + 1 < argc) {
-            arguments[argv[i]] = argv[i + 1];
-        }
-        else {
-            arguments[argv[i]] = "";
-        }
-    }
-
-    return arguments;
-}
-
 CComPtr<IMFSinkWriter> setupSinkWriter(const std::wstring& outputFilePath, bool isCompressed) {
     HRESULT hr;
 
@@ -800,21 +790,27 @@ int main(int argc, char* argv[]) {
     std::cout << "Version: " << GIT_TAG << std::endl;
 
     auto arguments = parseArgs(argc, argv);
+
+    if (arguments.count("-help") > 0 || arguments.count("-h") > 0) {
+        std::cout << "\n" << generateHelpText() << std::endl;
+        return 0;
+    }
+
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
+    bool version = arguments.count("-version") > 0; // print ver and exit
     int monitor = arguments.count("-monitor") > 0 ? std::atoi(arguments["-monitor"].c_str()) : 0; // 0 indexed
     std::string path = arguments.count("-path") > 0 ? arguments["-path"] : ""; // blank/empty means it will be handeled by the function
-    int framerate = arguments.count("-fps") > 0 ? strtoull(arguments["-fps"].c_str(), nullptr, 10) : -1; // MUST match monitor refresh rate
+    int framerate = arguments.count("-framerate") > 0 ? strtoull(arguments["-framerate"].c_str(), nullptr, 10) : -1; // MUST match monitor refresh rate
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
-    bool isCompressed = arguments.count("-comp") > 0 ? std::atoi(arguments["-comp"].c_str()) > 0 : false; // h264 vs raw RGB24
-    bool version = (arguments.count("-version") > 0 || arguments.count("-v") > 0); // print ver and exit
+    bool isCompressed = arguments.count("-compression") > 0 ? std::atoi(arguments["-compression"].c_str()) > 0 : false; // h264 vs raw RGB24
     int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
 
-    int queueLengthParam = (arguments.count("-queuelength") > 0 || arguments.count("-ql") > 0)
-        ? strtoull(arguments.count("-queuelength") > 0 ? arguments["-queuelength"].c_str() : arguments["-ql"].c_str(), nullptr, 10)
+    int queueLengthParam = arguments.count("-queuelength") > 0
+        ? strtoull(arguments["-queuelength"].c_str(), nullptr, 10)
         : -1; //frames in the queue
-    int swapSizeParam = (arguments.count("-queuethreshold") > 0 || arguments.count("-qt") > 0)
-        ? strtoull(arguments.count("-queuethreshold") > 0 ? arguments["-queuethreshold"].c_str() : arguments["-qt"].c_str(), nullptr, 10)
+    int swapSizeParam = arguments.count("-queuefullness") > 0
+        ? strtoull(arguments["-queuefullness"].c_str(), nullptr, 10)
         : -1; //queue fullness when swap
 
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
@@ -871,9 +867,6 @@ int main(int argc, char* argv[]) {
         runFor = 300; // default value if neither option is set (60fps * 5 sec = 300)
     }
 
-    // bitrate
-    bitrate = bitrate * 1000 * 1000; //bitrate specified in mbps
-
     //path
     std::filesystem::path outputFilePath;
     if (!generateOutputPath(path, isCompressed, outputFilePath)) {
@@ -887,6 +880,11 @@ int main(int argc, char* argv[]) {
     std::cout << "Framerate: " << framerate << std::endl;
     std::cout << "Queue size (frames): " << maxQueueLength << " | Swaps @ " << "1/" << swapSizeDivisor << " full (" << swapSize << ")" << std::endl;
     std::cout << "Compression: " << (isCompressed ? "TRUE" : "FALSE") << std::endl;
+    if (isCompressed) {
+        std::cout << "Bitrate: " << bitrate << " mbps" << std::endl;
+        bitrate = bitrate * 1000 * 1000; //bitrate specified in mbps
+    }
+
     std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
 

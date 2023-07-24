@@ -130,7 +130,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="arg_parser.cpp" />
     <ClCompile Include="PixElv.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="arg_parser.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
