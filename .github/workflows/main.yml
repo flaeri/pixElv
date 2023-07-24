@@ -1,4 +1,4 @@
-name: 'MSbuild C/C++ CI'
+name: 'Build CI Artifact'
 
 on:
   push:
@@ -13,21 +13,9 @@ jobs:
       - name: 'Checkout'
         uses: actions/checkout@v3
 
-      - name: Generate version
+      - name: Run Build Script
         run: |
-          $gitHash = git rev-parse HEAD
-          $gitTag = git describe --tags --always --dirty
-          @"
-          #pragma once
-          #define GIT_HASH "$gitHash"
-          #define GIT_TAG "$gitTag"
-          "@ | Out-File -FilePath git_info.h -Encoding ascii
-          
-      - name: Set up MSBuild
-        uses: microsoft/setup-msbuild@v1.1
-
-      - name: Build
-        run: msbuild PixElv.sln -t:rebuild -verbosity:minimal -property:Configuration=Release
+          pwsh -File Build.ps1
 
       - name: Test Compressed
         run: ./x64/Release/PixElv.exe -delay 0 -comp 1 -frames 25
@@ -38,5 +26,5 @@ jobs:
       - name: upload
         uses: actions/upload-artifact@v3
         with:
-          name: PixElv-x64
+          name: PixElv-${{ github.sha }}.zip
           path: ./x64/Release/PixElv.exe
