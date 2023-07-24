@@ -395,10 +395,11 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
     }
 }
 
-void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
+void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue, int swapSize) {
     int framesCaptured = 0;
-    int queueSize = frameQueue.getMaxSize();
-    int swapSize = queueSize/3;
+    int skippedFrames = 0;
+    int totalSkip = 0;
+    int queueMaxSize = frameQueue.getMaxSize();
     while (framesCaptured < runFor) {
         if (acquireFrame(resources)) {
             start_timer();
@@ -419,13 +420,17 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
 
         // Swap the queues when privateCaptureQueue is full OR when it has more than x frames and frameQueue is empty
         if (privateCaptureQueue.isFull()) {
-            std::cerr << "Warning: privateCaptureQueue is full. Waiting for frameQueue to empty...\n";
+            std::cerr << "Warning: CaptureQueue is full ("  << queueMaxSize << "). Waiting for drain!\n" ;
             bool swapped = false;
             while (!swapped) {
                 std::unique_lock<std::shared_mutex> lock(smtx);
+                skippedFrames++;
                 if (frameQueue.empty()) {
                     frameQueue.swap(privateCaptureQueue);
                     cv.notify_all(); // notify all waiting threads
+                    std::cerr << "Warning: skipped frames: " << skippedFrames << std::endl;
+                    totalSkip = totalSkip + skippedFrames;
+                    skippedFrames = 0;
                     swapped = true;
                 }
                 else {
@@ -455,7 +460,10 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
         frameQueue.swap(privateCaptureQueue);
     }
 
-    std::cout << "Total frames captured: " << framesCaptured << std::endl;
+    int actualFrames = framesCaptured - totalSkip;
+    std::cout << "\nAttempted frames: " << framesCaptured << std::endl;
+    std::cout << "Total skipped frames: " << totalSkip << std::endl;
+    std::cout << "Total frames captured: " << actualFrames << std::endl;
 }
 
 void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, DWORD streamIndex, uint64_t framerate, bool isCompressed) {
@@ -533,7 +541,7 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
                 return;
             }
         }
-        if (finished) { return; }
+        //if (finished) { return; }
     } while (hr == MF_E_NOTACCEPTING);
 
     // Get the transformed data
@@ -801,6 +809,14 @@ int main(int argc, char* argv[]) {
     bool isCompressed = arguments.count("-comp") > 0 ? std::atoi(arguments["-comp"].c_str()) > 0 : false; // h264 vs raw RGB24
     bool version = (arguments.count("-version") > 0 || arguments.count("-v") > 0); // print ver and exit
     int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
+
+    int queueLengthParam = (arguments.count("-queuelength") > 0 || arguments.count("-ql") > 0)
+        ? strtoull(arguments.count("-queuelength") > 0 ? arguments["-queuelength"].c_str() : arguments["-ql"].c_str(), nullptr, 10)
+        : -1; //frames in the queue
+    int swapSizeParam = (arguments.count("-queuethreshold") > 0 || arguments.count("-qt") > 0)
+        ? strtoull(arguments.count("-queuethreshold") > 0 ? arguments["-queuethreshold"].c_str() : arguments["-qt"].c_str(), nullptr, 10)
+        : -1; //queue fullness when swap
+
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
     
     if (version) { return 0; }
@@ -815,9 +831,26 @@ int main(int argc, char* argv[]) {
     if (framerate == -1) {
         framerate = resources.refreshRate;
     }
-    int maxQueueSize = framerate / 2; // 30 seems safe, ish. 60 works better, especially for 120fps.
-    FrameQueue frameQueue(maxQueueSize);
-    FrameQueue privateCaptureQueue(maxQueueSize);
+
+    //queue length (max frames in a queue)
+    int maxQueueLength;
+    if (queueLengthParam == -1) {
+        maxQueueLength = framerate / 2; // 30 seems safe, ish. 60 works better, especially for 120fps.
+    } else {
+        maxQueueLength = queueLengthParam;
+    }
+
+    FrameQueue frameQueue(maxQueueLength);
+    FrameQueue privateCaptureQueue(maxQueueLength);
+
+    // queue swap divisor/fullness. 60 / 4 = 15. Try to swap on 25% (15 out of 60). Half would be 2 (60/2)
+    int swapSizeDivisor;
+    if (swapSizeParam == -1) {
+        swapSizeDivisor = 3;
+    } else {
+        swapSizeDivisor = swapSizeParam;
+    }
+    int swapSize = maxQueueLength / swapSizeDivisor;
 
     // frames/duration
     int runFor = 0;
@@ -852,7 +885,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Height: " << resources.desc.Height << std::endl;
     std::cout << "Format: " << resources.desc.Format << std::endl;
     std::cout << "Framerate: " << framerate << std::endl;
-    std::cout << "Compression?: " << isCompressed << std::endl;
+    std::cout << "Queue size (frames): " << maxQueueLength << " | Swaps @ " << "1/" << swapSizeDivisor << " full (" << swapSize << ")" << std::endl;
+    std::cout << "Compression: " << (isCompressed ? "TRUE" : "FALSE") << std::endl;
     std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
 
@@ -970,7 +1004,7 @@ int main(int argc, char* argv[]) {
     if (finished) { return 0; }
 
     // spawn worker threads
-    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue));
+    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue), swapSize);
     std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, std::ref(frameQueue), std::ref(privateCaptureQueue)); //pTransform pEncoder
 
     
