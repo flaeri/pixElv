@@ -57,17 +57,18 @@ void SafeRelease(T** ppT) {
     }
 }
 
+int threadTimeoutSec = 10;
 std::shared_mutex smtx;
 std::condition_variable_any cv;
 bool finished = false;
 std::atomic<bool> runFlag{ true };
-std::chrono::milliseconds threadTimeout(5000); // only used for panic if we hang/deadlock, or need 5 sec to finalize long queue
+std::chrono::milliseconds threadTimeout(threadTimeoutSec*1000); // only used for panic if we hang/deadlock, or need 5 sec to finalize long queue
 
 BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
     switch (ctrlType) {
     case CTRL_C_EVENT:
     case CTRL_BREAK_EVENT:
-        std::cout << "Finishing... Please wait 5 sec" << std::endl;
+        std::cout << "Finishing... Please wait " << threadTimeoutSec << " sec" << std::endl;
         finished = true;
         return TRUE;
     default:
@@ -400,7 +401,7 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
     }
 }
 
-void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue, int swapSize) {
+void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue, int swapThreshold) {
     int framesCaptured = 0;
     int skippedFrames = 0;
     int totalSkip = 0;
@@ -446,7 +447,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
             }
         }
 
-        else if (privateCaptureQueue.size() >= swapSize && [&] {
+        else if (privateCaptureQueue.size() >= swapThreshold && [&] {
             std::shared_lock<std::shared_mutex> lock(smtx);
                 return frameQueue.empty();
             }()) {
@@ -455,7 +456,8 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
             cv.notify_all(); // notify all waiting threads
         }
         stop_timer(framerate, privateCaptureQueue.size(), frameQueue.size());
-        if (finished) { return; }
+        if (finished) { 
+            return; } //return
     }
 
     // At the end of capturing, if there are any frames left in the private queue, swap them into the shared queue
@@ -622,9 +624,12 @@ void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD str
             lock.unlock(); // unlock the mutex while writing the frame to disk
             writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, streamIndex, framerate, isCompressed);
             lock.lock(); // reacquire the lock before the next iteration
+            if (finished) { 
+                std::cout << "finishing writes, frames remaining: " << frameQueue.size() << std::endl;
+                if (frameQueue.empty()) { return; }
+            }
         }
-        if (finished && frameQueue.empty()) { 
-            return; }
+        if (finished && frameQueue.empty()) { return; }
     }
 }
 
@@ -809,8 +814,8 @@ int main(int argc, char* argv[]) {
     int queueLengthParam = arguments.count("-queuelength") > 0
         ? strtoull(arguments["-queuelength"].c_str(), nullptr, 10)
         : -1; //frames in the queue
-    int swapSizeParam = arguments.count("-queuefullness") > 0
-        ? strtoull(arguments["-queuefullness"].c_str(), nullptr, 10)
+    int swapSizeParam = arguments.count("-queuethreshold") > 0
+        ? strtoull(arguments["-queuethreshold"].c_str(), nullptr, 10)
         : -1; //queue fullness when swap
 
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
@@ -840,13 +845,13 @@ int main(int argc, char* argv[]) {
     FrameQueue privateCaptureQueue(maxQueueLength);
 
     // queue swap divisor/fullness. 60 / 4 = 15. Try to swap on 25% (15 out of 60). Half would be 2 (60/2)
-    int swapSizeDivisor;
+    int swapThreshold;
+    int swapDiv = 10; //test 3 (old) and 4,5. Smaller seems better (check overhead)
     if (swapSizeParam == -1) {
-        swapSizeDivisor = 3;
+        swapThreshold = std::clamp(framerate / swapDiv, 1, (maxQueueLength - 1));
     } else {
-        swapSizeDivisor = swapSizeParam;
+        swapThreshold = std::clamp(swapSizeParam, 1, (maxQueueLength-1));
     }
-    int swapSize = maxQueueLength / swapSizeDivisor;
 
     // frames/duration
     int runFor = 0;
@@ -878,7 +883,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Height: " << resources.desc.Height << std::endl;
     std::cout << "Format: " << resources.desc.Format << std::endl;
     std::cout << "Framerate: " << framerate << std::endl;
-    std::cout << "Queue size (frames): " << maxQueueLength << " | Swaps @ " << "1/" << swapSizeDivisor << " full (" << swapSize << ")" << std::endl;
+    std::cout << "Queue size (frames): " << maxQueueLength << " | Swaps @ " << swapThreshold << " frames" << std::endl;
     std::cout << "Compression: " << (isCompressed ? "TRUE" : "FALSE") << std::endl;
     if (isCompressed) {
         std::cout << "Bitrate: " << bitrate << " mbps" << std::endl;
@@ -1002,7 +1007,7 @@ int main(int argc, char* argv[]) {
     if (finished) { return 0; }
 
     // spawn worker threads
-    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue), swapSize);
+    std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue), swapThreshold);
     std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, std::ref(frameQueue), std::ref(privateCaptureQueue)); //pTransform pEncoder
 
     
