@@ -420,6 +420,9 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
             resources.pContext->Unmap(resources.pDebugTexture, 0);
 
             privateCaptureQueue.pushFrame(resources.mappedResource);
+            if (resources.frameInfo.AccumulatedFrames >= 2) {
+                std::cout << "missed frames: " << resources.frameInfo.AccumulatedFrames - 1 << std::endl;
+            }
             framesCaptured++;
             if (finished) { return; }
         }
