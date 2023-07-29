@@ -677,6 +677,7 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
     return true;
 }
 
+bool safetyoff = 0;
 CComPtr<IMFSinkWriter> setupSinkWriter(const std::wstring& outputFilePath, bool isCompressed) {
     HRESULT hr;
 
@@ -694,6 +695,18 @@ CComPtr<IMFSinkWriter> setupSinkWriter(const std::wstring& outputFilePath, bool 
         std::cerr << "Failed to set attribute";
         return nullptr;
     }
+
+    if (safetyoff) {
+        hr = pAttributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
+        if (FAILED(hr))
+        {
+            std::cerr << "Failed to disable writer throttling (safety OFF)" << std::endl;
+            return nullptr;
+        }
+        else { std::wcout << "Writer safety OFF! Mind memory usage!" << std::endl; }
+    }
+    
+
 
     IMFSinkWriter* pSinkWriter = nullptr;
     hr = MFCreateSinkWriterFromURL(outputFilePath.c_str(), NULL, pAttributes, &pSinkWriter);
@@ -813,6 +826,7 @@ int main(int argc, char* argv[]) {
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
     bool isCompressed = arguments.count("-compression") > 0 ? std::atoi(arguments["-compression"].c_str()) > 0 : false; // h264 vs raw RGB24
     int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
+    safetyoff = arguments.count("-safetyoff") > 0 ? std::atoi(arguments["-safetyoff"].c_str()) > 0: false;
 
     int queueLengthParam = arguments.count("-queuelength") > 0
         ? strtoull(arguments["-queuelength"].c_str(), nullptr, 10)
