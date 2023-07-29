@@ -76,6 +76,15 @@ BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
     }
 }
 
+bool isMemoryUsageHigh() {
+    MEMORYSTATUSEX statex;
+    statex.dwLength = sizeof(statex);
+
+    GlobalMemoryStatusEx(&statex);
+
+    return statex.dwMemoryLoad > 90; // dwMemoryLoad is a number between 0 and 100 representing the current memory usage
+}
+
 struct FrameData {
     unsigned int rowPitch;
     unsigned int depthPitch;
@@ -606,6 +615,11 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     else {
         std::cerr << "Failed to write sample" << std::endl;
         return;
+    }
+
+    if (isMemoryUsageHigh()) {
+        std::cerr << "\nMemory usage above 90%! Stopping...\n" << std::endl;
+        finished = true;
     }
 
     if (outputDataBuffer.pSample != nullptr) {
