@@ -135,12 +135,14 @@ public:
         return queue.empty();
     }
 
-    size_t size() {
-        return queue.size();
+    int size() const {
+        return static_cast<int>(queue.size());
     }
-    std::size_t getMaxSize() const {
-        return max_size;
+
+    int getMaxSize() const {
+        return static_cast<int>(max_size);
     }
+
     void swap(FrameQueue& other) {
         std::swap(queue, other.queue);
     }
@@ -607,6 +609,11 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
         }
     }
 
+    if (!outputDataBuffer.pSample) {
+        std::cerr << "NO sample!" << std::endl;
+        return;
+    }
+
     // Write the sample to disk
     hr = pSinkWriter->WriteSample(streamIndex, outputDataBuffer.pSample);
     if (hr == S_OK) {
@@ -615,11 +622,6 @@ void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWrit
     else {
         std::cerr << "Failed to write sample" << std::endl;
         return;
-    }
-
-    if (isMemoryUsageHigh()) {
-        std::cerr << "\nMemory usage above 90%! Stopping...\n" << std::endl;
-        finished = true;
     }
 
     if (outputDataBuffer.pSample != nullptr) {
@@ -644,6 +646,10 @@ void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD str
             if (finished) { 
                 std::cout << "finishing writes, frames remaining: " << frameQueue.size() << std::endl;
                 if (frameQueue.empty()) { return; }
+            }
+            if (isMemoryUsageHigh()) {
+                std::cerr << "\nMemory usage above 90%! Stopping! This might take a minute...\n" << std::endl;
+                finished = true;
             }
         }
         if (finished && frameQueue.empty()) { return; }
@@ -717,7 +723,7 @@ CComPtr<IMFSinkWriter> setupSinkWriter(const std::wstring& outputFilePath, bool 
             std::cerr << "Failed to disable writer throttling (safety OFF)" << std::endl;
             return nullptr;
         }
-        else { std::wcout << "Writer safety OFF! Mind memory usage!" << std::endl; }
+        else { std::wcout << "DANGER: Writer safety OFF! Mind memory usage!" << std::endl; }
     }
     
 
@@ -820,6 +826,14 @@ CComPtr<IMFMediaType> setupMediaType(int width, int height, int pixfmt, int fram
     return pMediaTypeOut;
 }
 
+int getArgAsInt(const std::map<std::string, std::string>& arguments, const std::string& argKey, int defaultValue = -1) {
+    if (arguments.count(argKey) > 0) {
+        unsigned __int64 temp = strtoull(arguments.at(argKey).c_str(), nullptr, 10);
+        return static_cast<int>(temp);
+    }
+    return defaultValue;
+}
+
 int main(int argc, char* argv[]) {
     std::cout << "Git Hash: " << GIT_HASH << std::endl;
     std::cout << "Version: " << GIT_TAG << std::endl;
@@ -836,18 +850,13 @@ int main(int argc, char* argv[]) {
     bool version = arguments.count("-version") > 0; // print ver and exit
     int monitor = arguments.count("-monitor") > 0 ? std::atoi(arguments["-monitor"].c_str()) : 0; // 0 indexed
     std::string path = arguments.count("-path") > 0 ? arguments["-path"] : ""; // blank/empty means it will be handeled by the function
-    int framerate = arguments.count("-framerate") > 0 ? strtoull(arguments["-framerate"].c_str(), nullptr, 10) : -1; // MUST match monitor refresh rate
+    int framerate = getArgAsInt(arguments, "-framerate"); // MUST match monitor refresh rate
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
     bool isCompressed = arguments.count("-compression") > 0 ? std::atoi(arguments["-compression"].c_str()) > 0 : false; // h264 vs raw RGB24
-    int bitrate = arguments.count("-bitrate") > 0 ? strtoull(arguments["-bitrate"].c_str(), nullptr, 10) : 30;
+    int bitrate = getArgAsInt(arguments, "-bitrate", 30);
     safetyoff = arguments.count("-safetyoff") > 0 ? std::atoi(arguments["-safetyoff"].c_str()) > 0: false;
-
-    int queueLengthParam = arguments.count("-queuelength") > 0
-        ? strtoull(arguments["-queuelength"].c_str(), nullptr, 10)
-        : -1; //frames in the queue
-    int swapSizeParam = arguments.count("-queuethreshold") > 0
-        ? strtoull(arguments["-queuethreshold"].c_str(), nullptr, 10)
-        : -1; //queue fullness when swap
+    int queueLengthParam = getArgAsInt(arguments, "-queuelength"); //frames in the queue
+    int swapSizeParam = getArgAsInt(arguments, "-queuethreshold"); //queue fullness when swap
 
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
     
