@@ -13,6 +13,14 @@ jobs:
       - name: 'Checkout'
         uses: actions/checkout@v3
 
+      - name: Download FFmpeg Dependencies
+        run: |
+          curl -L -o pixElv-deps.7z https://otterbro.com/pixElv-deps.7z
+
+      - name: Extract FFmpeg Dependencies
+        run: |
+          7z x .\pixElv-deps.7z -o"./deps/"
+
       - name: Run Build Script
         run: |
           pwsh -File Build.ps1
@@ -23,8 +31,16 @@ jobs:
       - name: Test Raw
         run: ./x64/Release/PixElv.exe -delay 0 -comp 0 -frames 2
 
-      - name: upload
+      - name: Copy DLLs to Release directory
+        run: |
+          copy-item -path .\deps\bin\*.dll -Destination .\x64\Release\ -force
+
+      - name: Zip the Release directory
+        run: |
+          7z a -tzip PixElv-${{ github.sha }}.zip .\x64\Release\*
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v3
         with:
           name: PixElv-${{ github.sha }}.zip
-          path: ./x64/Release/PixElv.exe
+          path: ./PixElv-${{ github.sha }}.zip

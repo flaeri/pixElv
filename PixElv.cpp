@@ -11,6 +11,8 @@
 #include <queue>
 #include <future>
 #include <mfidl.h>
+#include <vector>
+#include <string>
 #include <cstring> // for params
 #include <cstdlib> // for params
 #include <map> // for params
@@ -19,34 +21,12 @@
 #include <csignal> // ctrl+c
 #include <atomic>
 #include "git_info.h" // for git tag + hash
-
-//MF
-#include <mfapi.h>
-#include <atlbase.h>
-#include <mfreadwrite.h>
-#include <windows.h>
-#include <atlcomcli.h>
-#include <mferror.h>
-#include <codecapi.h>
-#include <strmif.h>
-#include <wmcodecdsp.h>
-#include <mfobjects.h>
 #include <shared_mutex>
 
-//args
+//ff
+#include "ffmpeg.hpp"
 
-
-#pragma comment(lib, "mfuuid.lib")
-#pragma comment(lib, "Kernel32.lib")
-#pragma comment(lib, "mf.lib")
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfreadwrite.lib")
-#pragma comment(lib, "mfuuid.lib")
-#pragma comment(lib, "wmcodecdspuuid.lib")
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfreadwrite.lib")
 #pragma comment(lib, "d3d11.lib")
-
 
 #define CHECK_HR(hr) { if (FAILED(hr)) { std::cerr << "Failed at line " << __LINE__ << std::endl; return {}; } }
 template <typename T>
@@ -161,32 +141,58 @@ struct DxgiResources {
     UINT refreshRate;
 };
 
-void EnumerateEncoders() {
-    UINT32 count = 0;
-    IMFActivate** ppActivate = NULL;
+void listH264Encoders() {
+    const AVCodec* codec = nullptr;
+    void* iter = nullptr;
 
-    HRESULT hr = MFTEnumEx(
-        MFT_CATEGORY_VIDEO_ENCODER,
-        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_ASYNCMFT | MFT_ENUM_FLAG_HARDWARE,
-        NULL,   // Input type
-        NULL,   // Output type
-        &ppActivate,
-        &count
-    );
-
-    if (SUCCEEDED(hr)) {
-        for (UINT32 i = 0; i < count; i++) {
-            UINT32 len = 0;
-            WCHAR* name = NULL;
-
-            hr = ppActivate[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &name, &len);
-            if (SUCCEEDED(hr)) {
-                std::wcout << L"Found encoder: " << name << std::endl;
-                CoTaskMemFree(name);
+    while ((codec = av_codec_iterate(&iter))) {
+        if (codec->type == AVMEDIA_TYPE_VIDEO && av_codec_is_encoder(codec)) {
+            if (strstr(codec->name, "h264")) {
+                std::cout << "Found encoder: " << codec->name << std::endl;
             }
         }
-        CoTaskMemFree(ppActivate);
     }
+}
+
+const AVCodec* findSuitableCodec(bool isCompressed) {
+    std::vector<std::string> codecs;
+
+    if (isCompressed) {
+        // Priority for compressed codecs
+        codecs = { "h264_nvenc", "h264_amf", "libx264" };
+    }
+    else {
+        // Priority for uncompressed codecs. Add more if needed.
+        codecs = { "libx264rgb" }; // Add others like "rawvideo", "qtrle", etc. if necessary
+    }
+
+    AVCodecContext* tempCodecCtx = nullptr;
+
+    for (const auto& codecName : codecs) {
+        const AVCodec* codec = avcodec_find_encoder_by_name(codecName.c_str());
+        if (codec) {
+            tempCodecCtx = avcodec_alloc_context3(codec);
+            if (!tempCodecCtx) {
+                continue; // if allocation failed, move on to next codec
+            }
+
+            // Set up the codec context with dummy values
+            tempCodecCtx->codec_type = AVMEDIA_TYPE_VIDEO;
+            tempCodecCtx->pix_fmt = isCompressed ? AV_PIX_FMT_NV12 : AV_PIX_FMT_BGR24; // Default to common formats
+            tempCodecCtx->width = 1920;
+            tempCodecCtx->height = 1080;
+            tempCodecCtx->time_base = AVRational{ 1, 60 }; // 60fps
+
+            if (avcodec_open2(tempCodecCtx, codec, nullptr) == 0) {
+                avcodec_free_context(&tempCodecCtx); // Close and free the temporary codec context
+                return codec; // Codec opened successfully, return it.
+            }
+
+            avcodec_free_context(&tempCodecCtx); // Close and free the temporary codec context
+        }
+    }
+
+    return nullptr; // No suitable codec found
 }
 
 DxgiResources initializeDxgi(int monitorIndex) {
@@ -295,51 +301,6 @@ DxgiResources initializeDxgi(int monitorIndex) {
     resources.pContext->Unmap(resources.pDebugTexture, 0);
 
     return resources;
-}
-
-IMFSample* createMediaSample(BYTE* data, DWORD cbData, const std::string& error_msg) {
-    HRESULT hr = S_OK;
-    IMFSample* pSample = NULL;
-    IMFMediaBuffer* pBuffer = NULL;
-
-    // Create a new media sample
-    hr = MFCreateSample(&pSample);
-
-    // Create a new memory buffer
-    if (SUCCEEDED(hr)) {
-        hr = MFCreateMemoryBuffer(cbData, &pBuffer);
-    }
-
-    // If data is provided, copy it into the buffer
-    if (SUCCEEDED(hr) && data != nullptr) {
-        BYTE* pBufferStart = NULL;
-        DWORD cbMaxLength = 0, cbCurrentLength = 0;
-
-        hr = pBuffer->Lock(&pBufferStart, &cbMaxLength, &cbCurrentLength);
-        if (SUCCEEDED(hr)) {
-            CopyMemory(pBufferStart, data, cbData);
-            hr = pBuffer->Unlock();
-        }
-
-        if (SUCCEEDED(hr)) {
-            hr = pBuffer->SetCurrentLength(cbData);
-        }
-    }
-
-    // Add the buffer to the sample
-    if (SUCCEEDED(hr)) {
-        hr = pSample->AddBuffer(pBuffer);
-    }
-
-    // If anything failed, release any resources we have and return null
-    if (FAILED(hr)) {
-        std::cerr << "Failed to " << error_msg << "\n";
-        SafeRelease(&pSample);
-        pSample = NULL;
-    }
-
-    SafeRelease(&pBuffer);
-    return pSample;
 }
 
 bool acquireFrame(DxgiResources& resources) {
@@ -487,161 +448,123 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
     std::cout << "Total frames captured: " << actualFrames << std::endl;
 }
 
-void writeFrameToDisk(FrameData frameData, DxgiResources& resources, IMFSinkWriter* pSinkWriter, IMFTransform* pTransform, DWORD streamIndex, uint64_t framerate, bool isCompressed) {
-    HRESULT hr;
-    MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
-    
-    // Create the input sample
-    IMFSample* pInputSample = createMediaSample(
-        frameData.data,
-        resources.desc.Width * resources.desc.Height * 4, // RGBA 
-        "creating input sample"
-    );
+static int64_t current_pts = 0; // This should be initialized only once, and then we just increment it
+void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed) {
+    int ret = 0;
 
-    // Create the output sample
-    IMFSample* pOutputSample = createMediaSample(
-        nullptr,  // No data to copy
-        resources.desc.Width * resources.desc.Height * 4,
-        "creating output sample"
-    );
+    uint8_t* inData[4] = { frameData.data, nullptr, nullptr, nullptr };
+    int inLinesize[4] = { static_cast<int>(frameData.rowPitch), 0, 0, 0 };
 
-    if (isFirstSample) {
-        // Convert frame rate to frame duration in seconds
-        double frameDurationSec = 1.0 / framerate;
-
-        // Convert frame duration from seconds to nanosecond units
-        LONGLONG llSampleDuration = static_cast<LONGLONG>(frameDurationSec * 10.0 * 1000 * 1000);
-        LONGLONG llSampleTime = static_cast<LONGLONG>(framesWritten * frameDurationSec * 10.0 * 1000 * 1000);
-
-        hr = pInputSample->SetSampleTime(llSampleTime);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to set sample time";
-            return;
-        }
-
-        hr = pInputSample->SetSampleDuration(llSampleDuration);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to set input sample duration";
-            return;
-        }
-
-        // Set the initial timestamp and duration for the first sample
-        hr = pOutputSample->SetSampleTime(llSampleTime);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to set sample time";
-            return;
-        }
-
-        hr = pOutputSample->SetSampleDuration(llSampleDuration);
-        if (FAILED(hr)) {
-            std::cerr << "Failed to set sample duration";
-            return;
-        }
-    }
-
-    outputDataBuffer = { 0, pOutputSample, 0, NULL };
-    DWORD status;
-
-    // you MUST use ProcessOutput to ask pTransform if its empty. Otherwise its going to think it still has data.
-    hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-    if (FAILED(hr) && hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
-        std::cerr << "Failed at line " << __LINE__ << std::endl;
-        return;
-    }
-
-    do {
-        hr = pTransform->ProcessInput(0, pInputSample, 0);
-        if (hr == MF_E_NOTACCEPTING) {
-            // Not ready for input, attempt to process output
-            hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-            if (hr == MF_E_NOTACCEPTING || hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
-                return;
-            }
-            if (FAILED(hr)) {
-                std::cerr << "Failed at line " << __LINE__ << " " << hr << std::endl;
-                return;
-            }
-        }
-        //if (finished) { return; }
-    } while (hr == MF_E_NOTACCEPTING);
-
-    // Get the transformed data
-    hr = pTransform->ProcessOutput(0, 1, &outputDataBuffer, &status);
-    if (FAILED(hr)) {
-        std::cerr << "Failed at line " << __LINE__ << std::endl;
-        return;
-    }
+    // Allocate a frame to hold the NV12 data
+    AVFrame* frame = av_frame_alloc();
+    frame->format = codecCtx->pix_fmt;
+    frame->width = resources.desc.Width;
+    frame->height = resources.desc.Height;
 
     if (isCompressed) {
-        if (!isFirstSample) {
+        // Manual allocation for NV12 format
+        uint8_t* out_planes[2];
+        out_planes[0] = (uint8_t*)av_malloc(static_cast<size_t>(resources.desc.Width) * resources.desc.Height);     // Y plane
+        out_planes[1] = (uint8_t*)av_malloc(static_cast<size_t>(resources.desc.Width) * resources.desc.Height / 2); // UV plane
 
-            // Set the input sample timestamp and duration based on the output sample values
-            hr = pInputSample->SetSampleTime(llOutputSampleTime);
-            if (FAILED(hr)) {
-                std::cerr << "Failed to set sample time";
-                return;
-            }
-
-            hr = pInputSample->SetSampleDuration(llOutputSampleDuration);
-            if (FAILED(hr)) {
-                std::cerr << "Failed to set sample duration";
-                return;
-            }
-        }
-        isFirstSample = false;  // Reset flag after setting initial values
-
-
-        if (!isFirstSample) {
-            // Get the timestamp and duration from the output sample
-
-            hr = outputDataBuffer.pSample->GetSampleDuration(&llOutputSampleDuration);
-            if (FAILED(hr)) {
-                std::cerr << "Failed to get sample duration";
-                return;
-            }
-
-            llOutputSampleTime = llOutputSampleTime + llOutputSampleDuration;
-        }
-
-        // Dont care, release
-        if (outputDataBuffer.pEvents) {
-            outputDataBuffer.pEvents->Release();
-        }
+        frame->data[0] = out_planes[0];
+        frame->data[1] = out_planes[1];
+        frame->linesize[0] = resources.desc.Width;
+        frame->linesize[1] = resources.desc.Width; // NV12 UV plane has the same width but half the height
     }
 
-    if (!outputDataBuffer.pSample) {
-        std::cerr << "NO sample!" << std::endl;
+    int pts_increment = videoStream->time_base.den / videoStream->avg_frame_rate.num;
+    frame->pts = current_pts;
+    current_pts += pts_increment;
+    frame->pkt_duration = pts_increment;
+
+    if (av_frame_get_buffer(frame, 0) < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        std::cerr << "Could not allocate the video frame data: " << errbuf << std::endl;
+        av_frame_free(&frame);
         return;
     }
 
-    // Write the sample to disk
-    hr = pSinkWriter->WriteSample(streamIndex, outputDataBuffer.pSample);
-    if (hr == S_OK) {
-        framesWritten++;
-    }
-    else {
-        std::cerr << "Failed to write sample" << std::endl;
+    // Create a scaling context
+    SwsContext* swsCtx = sws_getContext(
+        frame->width, frame->height, AV_PIX_FMT_BGRA,
+        frame->width, frame->height, codecCtx->pix_fmt, //AV_PIX_FMT_RGB24 AV_PIX_FMT_BGR24
+        SWS_BILINEAR, nullptr, nullptr, nullptr
+    );
+
+    if (!swsCtx) {
+        std::cerr << "Could not initialize the conversion context";
+        av_frame_free(&frame);
         return;
     }
 
-    if (outputDataBuffer.pSample != nullptr) {
-        outputDataBuffer.pSample->Release();
+    // Convert BGRA
+    sws_scale(
+        swsCtx,
+        inData, inLinesize,
+        0, frame->height,
+        frame->data, frame->linesize
+    );
+
+    // Initialize packet
+    AVPacket pkt = { 0 };
+
+    //check frame
+    if (!frame || !frame->data[0]) {
+        std::cerr << "Frame is not correctly initialized!";
+        return;
     }
 
-    if (pInputSample != nullptr) {
-        pInputSample->Release();
+    if (!codecCtx) {
+        std::cerr << "Codec context is null." << std::endl;
+        return;
     }
+
+    // Send the frame to the encoder
+    ret = avcodec_send_frame(codecCtx, frame);
+    if (ret < 0) {
+        char errbuf[AV_ERROR_MAX_STRING_SIZE];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        std::cerr << "Error sending frame to encoder: " << errbuf << std::endl;
+        return;
+    }
+
+
+    // Receive packets from the encoder and write them to the output file
+    while (ret >= 0) {
+        ret = avcodec_receive_packet(codecCtx, &pkt);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            break;
+        }
+        else if (ret < 0) {
+            std::cerr << "Error receiving packet from encoder" << std::endl;
+            return;
+        }
+
+        pkt.stream_index = videoStream->index;
+        av_interleaved_write_frame(outContext, &pkt);
+        av_packet_unref(&pkt);
+    }
+
+    // Free the frame when you're done
+    av_frame_free(&frame);
+    framesWritten++;
+
     delete[] frameData.data;
+    sws_freeContext(swsCtx);
+    //av_free(out_planes[0]);
+    //av_free(out_planes[1]);
 }
 
-void writeFrames(DxgiResources& resources, IMFSinkWriter* pSinkWriter, DWORD streamIndex, uint64_t framerate, bool isCompressed, IMFTransform* pTransform, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
+void writeFrames(AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
     while (!finished || !frameQueue.empty()) {
         std::unique_lock<std::shared_mutex> lock(smtx);
         cv.wait_for(lock, threadTimeout, [&frameQueue] {return finished || !frameQueue.empty(); });
         while (!frameQueue.empty()) {
             FrameData frameData = frameQueue.popFrame();
             lock.unlock(); // unlock the mutex while writing the frame to disk
-            writeFrameToDisk(frameData, resources, pSinkWriter, pTransform, streamIndex, framerate, isCompressed);
+            writeFrameToDisk(frameData, outContext, videoStream, codecCtx, resources, framerate, isCompressed);
             lock.lock(); // reacquire the lock before the next iteration
             if (finished) { 
                 std::cout << "finishing writes, frames remaining: " << frameQueue.size() << std::endl;
@@ -668,15 +591,15 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
     outputPath = pathArg;
 
     // validate obvious stuff
-    if (isCompressed && outputPath.extension() == ".avi") {
+    /*if (isCompressed && outputPath.extension() == ".avi") {
         std::cerr << "Error: Invalid extension '.avi' for compressed output, please use .mp4 or .mov etc.\n";
         return false;
-    }
+    }*/
 
-    if (!isCompressed && (outputPath.extension() == ".mp4" || outputPath.extension() == ".mov")) {
+    /*if (!isCompressed && (outputPath.extension() == ".mp4" || outputPath.extension() == ".mov")) {
         std::cerr << "Error: Invalid extension '" + outputPath.extension().string() + "' for uncompressed output, please use .avi\n";
         return false;
-    }
+    }*/
 
     // If a path argument is given, use it directly
     if (!pathArg.empty()) {
@@ -689,141 +612,12 @@ bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::file
             sprintf_s(filename, "output.mp4");
         }
         else {
-            sprintf_s(filename, "output.avi");
+            sprintf_s(filename, "output-ll.mov"); //avi
         }
         outputPath = std::filesystem::current_path() / filename;
     }
 
     return true;
-}
-
-bool safetyoff = 0;
-CComPtr<IMFSinkWriter> setupSinkWriter(const std::wstring& outputFilePath, bool isCompressed) {
-    HRESULT hr;
-
-    CComPtr<IMFAttributes> pAttributes;
-    hr = MFCreateAttributes(&pAttributes, 1);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to create attributes";
-        return nullptr;
-    }
-
-    hr = pAttributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set attribute";
-        return nullptr;
-    }
-
-    if (safetyoff) {
-        hr = pAttributes->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);
-        if (FAILED(hr))
-        {
-            std::cerr << "Failed to disable writer throttling (safety OFF)" << std::endl;
-            return nullptr;
-        }
-        else { std::wcout << "DANGER: Writer safety OFF! Mind memory usage!" << std::endl; }
-    }
-    
-
-
-    IMFSinkWriter* pSinkWriter = nullptr;
-    hr = MFCreateSinkWriterFromURL(outputFilePath.c_str(), NULL, pAttributes, &pSinkWriter);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to create sink writer";
-        return nullptr;
-    }
-
-    return pSinkWriter;
-}
-
-CComPtr<IMFMediaType> setupMediaType(int width, int height, int pixfmt, int framerate, int bitrate) {
-    HRESULT hr;
-    GUID format;
-
-    // Choose format
-    switch (pixfmt) {
-    case 0:
-        format = MFVideoFormat_RGB24; // {00000014-0000-0010-8000-00AA00389B71}
-        break;
-    case 1:
-        format = MFVideoFormat_YUY2;
-        break;
-    case 2:
-        format = MFVideoFormat_H264;
-        break;
-    case 3:
-        format = MFVideoFormat_ARGB32; // {00000015-0000-0010-8000-00AA00389B71}
-        break;
-    case 4:
-        format = MFVideoFormat_NV12;
-        break;
-    default:
-        std::cerr << "Invalid pixel format specified";
-        return nullptr;
-    }
-
-    CComPtr<IMFMediaType> pMediaTypeOut;
-    hr = MFCreateMediaType(&pMediaTypeOut);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to create media type";
-        return nullptr;
-    }
-
-    hr = pMediaTypeOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set MF_MT_MAJOR_TYPE\n";
-        return nullptr;
-    }
-
-    hr = pMediaTypeOut->SetGUID(MF_MT_SUBTYPE, format);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set MF_MT_SUBTYPE\n";
-        return nullptr;
-    }
-
-    hr = pMediaTypeOut->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set MF_MT_INTERLACE_MODE\n";
-        return nullptr;
-    }
-
-    hr = MFSetAttributeSize(pMediaTypeOut, MF_MT_FRAME_SIZE, width, height);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set MF_MT_FRAME_SIZE\n";
-        return nullptr;
-    }
-
-    hr = MFSetAttributeRatio(pMediaTypeOut, MF_MT_FRAME_RATE, framerate, 1);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set MF_MT_FRAME_RATE\n";
-        return nullptr;
-    }
-
-    hr = MFSetAttributeRatio(pMediaTypeOut, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to set MF_MT_PIXEL_ASPECT_RATIO\n";
-        return nullptr;
-    }
-
-    if (bitrate) {
-    hr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-    if (FAILED(hr)) {
-            std::cerr << "Failed to set MF_MT_INTERLACE_MODE\n";
-            return nullptr;
-        }
-    }
-
-    return pMediaTypeOut;
 }
 
 int getArgAsInt(const std::map<std::string, std::string>& arguments, const std::string& argKey, int defaultValue = -1) {
@@ -837,6 +631,7 @@ int getArgAsInt(const std::map<std::string, std::string>& arguments, const std::
 int main(int argc, char* argv[]) {
     std::cout << "Git Hash: " << GIT_HASH << std::endl;
     std::cout << "Version: " << GIT_TAG << std::endl;
+    printf("Linked with FFmpeg version: %s\n", av_version_info());
 
     auto arguments = parseArgs(argc, argv);
 
@@ -845,7 +640,8 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    HRESULT hr;
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED); //COINIT_APARTMENTTHREADED
 
     bool version = arguments.count("-version") > 0; // print ver and exit
     int monitor = arguments.count("-monitor") > 0 ? std::atoi(arguments["-monitor"].c_str()) : 0; // 0 indexed
@@ -854,7 +650,6 @@ int main(int argc, char* argv[]) {
     int delay = arguments.count("-delay") > 0 ? std::atoi(arguments["-delay"].c_str()) : 3; // 1 sec wait default
     bool isCompressed = arguments.count("-compression") > 0 ? std::atoi(arguments["-compression"].c_str()) > 0 : false; // h264 vs raw RGB24
     int bitrate = getArgAsInt(arguments, "-bitrate", 30);
-    safetyoff = arguments.count("-safetyoff") > 0 ? std::atoi(arguments["-safetyoff"].c_str()) > 0: false;
     int queueLengthParam = getArgAsInt(arguments, "-queuelength"); //frames in the queue
     int swapSizeParam = getArgAsInt(arguments, "-queuethreshold"); //queue fullness when swap
 
@@ -925,10 +720,6 @@ int main(int argc, char* argv[]) {
     std::cout << "Framerate: " << framerate << std::endl;
     std::cout << "Queue size (frames): " << maxQueueLength << " | Swaps @ " << swapThreshold << " frames" << std::endl;
     std::cout << "Compression: " << (isCompressed ? "TRUE" : "FALSE") << std::endl;
-    if (isCompressed) {
-        std::cout << "Bitrate: " << bitrate << " mbps" << std::endl;
-        bitrate = bitrate * 1000 * 1000; //bitrate specified in mbps
-    }
 
     std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
@@ -936,106 +727,101 @@ int main(int argc, char* argv[]) {
     // Set power state (dont sleep!)
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
 
-    // Start Media Foundation
-    hr = MFStartup(MF_VERSION);
-    if (FAILED(hr))
-    {
-        std::cerr << "Failed to initialize Media Foundation";
+    // ffmpeg start
+    //listH264Encoders();
+
+    AVFormatContext* outContext = nullptr;
+    AVStream* videoStream = nullptr;
+
+    std::string outputFilePathStr = outputFilePath.string();
+    avformat_alloc_output_context2(&outContext, nullptr, isCompressed ? "mp4" : "mov", outputFilePathStr.c_str()); //avi
+    if (!outContext) {
+        std::cerr << "Could not create output context";
         return -1;
     }
 
-    // Init transformers
-    IMFTransform* pTransform = NULL;
-    IMFVideoProcessorControl* pVPC = NULL;
-
-    // Create the video processor MFT.
-    hr = CoCreateInstance(
-        CLSID_VideoProcessorMFT,
-        NULL,
-        CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&pTransform)
-    );
-    if (FAILED(hr)) {
-        std::cerr << "Failed to create transformer MFT";
+    const AVCodec* codec = findSuitableCodec(isCompressed);
+    if (!codec) {
+        std::cerr << "Suitable codec not found!";
         return -1;
     }
 
-    hr = pTransform->QueryInterface(IID_PPV_ARGS(&pVPC));
-    if (FAILED(hr)) {
-        std::cerr << "Failed to query IMFVideoProcessorControl";
+    printf("\nCodec chosen: %s\n", codec->name);
+
+    videoStream = avformat_new_stream(outContext, codec);
+    if (!videoStream) {
+        std::cerr << "Failed allocating video stream";
         return -1;
     }
 
-    // Set mirror mode to vertical if compressed, yuv wants to not be upside down
-    hr = pVPC->SetMirror(isCompressed ? MIRROR_VERTICAL : MIRROR_NONE);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set mirror mode";
-        return -1;
-    }
-    pVPC->Release();
+    videoStream->time_base = AVRational{ 1, 90000 };
+    const int pts_increment = videoStream->time_base.den / framerate;
+    videoStream->avg_frame_rate = AVRational{ framerate, 1 };
 
-    // pixfmt: 0=RGB24, 1=YUY2, 2=H264, 3=ARGB32, 4=NV12
-    CComPtr<IMFMediaType> ARBG = setupMediaType(resources.desc.Width, resources.desc.Height, 3, framerate, NULL);
-    if (!ARBG) {
-        std::cerr << "Failed to create media type IN";
+    // 2. Allocate the codec context
+    AVCodecContext* codecCtx = avcodec_alloc_context3(codec);
+    if (!codecCtx) {
+        std::cerr << "Failed to allocate codec context!";
         return -1;
     }
 
-    CComPtr<IMFMediaType> NV12 = setupMediaType(resources.desc.Width, resources.desc.Height, 4, framerate, NULL);
-    if (!NV12) {
-        std::cerr << "Failed to create media type OUT";
+    codecCtx->codec_type = AVMEDIA_TYPE_VIDEO;
+    codecCtx->pix_fmt = isCompressed ? AV_PIX_FMT_NV12 : AV_PIX_FMT_BGR24; // AV_PIX_FMT_RGB24 AV_PIX_FMT_BGR24  AV_PIX_FMT_GBRP AV_PIX_FMT_GBRP12LE
+    codecCtx->width = resources.desc.Width;
+    codecCtx->height = resources.desc.Height;
+    codecCtx->time_base = videoStream->time_base;
+    // Add any additional codec settings here, such as bitrate, GOP size, etc.
+
+    // If the output format needs global headers, set the flag
+    if (outContext->oformat->flags & AVFMT_GLOBALHEADER) {
+        codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    }
+
+    // 4. Open the codec
+    AVDictionary* codec_options = nullptr;
+    av_dict_set(&codec_options, "bf", "0", 0);
+    
+    if (!isCompressed && strcmp(codec->name, "libx264rgb") == 0) {
+        av_dict_set(&codec_options, "qp", "0", 0);
+        av_dict_set(&codec_options, "preset", "ultrafast", 0); //superfast
+    }
+
+    if (isCompressed) {
+        av_dict_set(&codec_options, "qp", "16", 0);
+    }
+
+    if (avcodec_open2(codecCtx, codec, &codec_options) < 0) {
+        std::cerr << "Failed to open codec!";
+        avcodec_free_context(&codecCtx);
         return -1;
     }
 
-    CComPtr<IMFMediaType> RGB = setupMediaType(resources.desc.Width, resources.desc.Height, 0, framerate, NULL);
-    if (!RGB) {
-        std::cerr << "Failed to create media type OUT";
+    int ret = avcodec_parameters_from_context(videoStream->codecpar, codecCtx);
+    if (ret < 0) {
+        std::cerr << "Failed param from context";
         return -1;
     }
 
-    CComPtr<IMFMediaType> h264 = setupMediaType(resources.desc.Width, resources.desc.Height, 2, framerate, bitrate);
-    if (!h264) {
-        std::cerr << "Failed to create media type OUT";
+    // Open output file and write the header
+    if (!(outContext->oformat->flags & AVFMT_NOFILE)) {
+        if (avio_open(&outContext->pb, outputFilePathStr.c_str(), AVIO_FLAG_WRITE) < 0) {
+            std::cerr << "Failed to open output file";
+            return -1;
+        }
+    }
+
+    if (avformat_write_header(outContext, nullptr) < 0) {
+        std::cerr << "Error occurred when opening output file.";
         return -1;
     }
 
-    hr = pTransform->SetOutputType(0, isCompressed ? NV12 : RGB, 0);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set output type for transform" << __LINE__ << std::endl;
+    //tests
+    if (!codecCtx || (codecCtx->codec_type != AVMEDIA_TYPE_VIDEO)) {
+        std::cerr << "Codec context is not correctly initialized!";
         return -1;
     }
 
-    hr = pTransform->SetInputType(0, ARBG, 0);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set input type for transform" << __LINE__ << std::endl;
-    }
-
-    // PLEASE LET IT END
-
-    CComPtr<IMFSinkWriter> pSinkWriter = setupSinkWriter(outputFilePath.wstring(), isCompressed);
-    if (!pSinkWriter) {
-        std::cerr << "Failed to create sink writer" << __LINE__ << std::endl;
-        return -1;
-    }
-
-    DWORD streamIndex;
-    hr = pSinkWriter->AddStream(isCompressed ? h264 : RGB, &streamIndex);
-    if (FAILED(hr)) {
-        std::cerr << "Failed at line: " << __LINE__ << std::endl;
-    }
-
-    hr = pSinkWriter->SetInputMediaType(streamIndex, isCompressed ? NV12 : RGB, NULL);
-    if (FAILED(hr)) {
-        std::cerr << "Failed to set input media type on SinkWriter" << __LINE__ << std::endl;
-        return 1;
-    }
-
-    hr = pSinkWriter->BeginWriting();
-    if (FAILED(hr)) {
-        std::cerr << "Failed at line: " << __LINE__ << std::endl;
-    }
-
-    // end media foundation prep
+    // ffmpeg end
 
     std::cout << "\nCapture starting in:" << std::endl;
 
@@ -1048,26 +834,30 @@ int main(int argc, char* argv[]) {
 
     // spawn worker threads
     std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue), swapThreshold);
-    std::thread writeThread(writeFrames, std::ref(resources), pSinkWriter, streamIndex, framerate, isCompressed, pTransform, std::ref(frameQueue), std::ref(privateCaptureQueue)); //pTransform pEncoder
-
+    std::thread writeThread(writeFrames, outContext, videoStream, codecCtx, std::ref(resources), framerate, isCompressed, std::ref(frameQueue), std::ref(privateCaptureQueue));
     
     captureThread.join(); // rounds up the cap thread (stop)
     std::cout << "Capture ended!\n ------" << std::endl;
     // Notify writeThread that no more frames will be pushed into the queue
     if (!finished) { 
-        std::cout << "Finishing... Please wait 5 sec" << std::endl;
+        std::cout << "Finishing... Please wait 10 sec" << std::endl;
         finished = true;
     }
     
     writeThread.join(); // rounds up the writer thread (stop)
 
-    hr = pSinkWriter->Finalize();
-    if (FAILED(hr)) {
-        std::cerr << "Failed at line: " << __LINE__ << std::endl;
+    // finalize file and close ffmpeg stuff
+    av_write_trailer(outContext);
+    avcodec_close(codecCtx);
+    avcodec_free_context(&codecCtx);
+    if (!(outContext->oformat->flags & AVFMT_NOFILE)) {
+        avio_closep(&outContext->pb);
     }
+    avformat_free_context(outContext);
+
 
     //std::cout << "Timeouts: " << timeOutCounter << std::endl;
-    std::cout << "Frames written: " << framesWritten << std::endl;
+    std::cout << "\nFrames written: " << framesWritten << std::endl;
     std::cout << "Frames requested: " << runFor << std::endl;
     std::cout << "\nDone! :)" << std::endl;
 
@@ -1079,7 +869,6 @@ int main(int argc, char* argv[]) {
     resources.pContext->Release();
     resources.pDevice->Release();
 
-    MFShutdown();
     SetThreadExecutionState(ES_CONTINUOUS);
 
     return 0;

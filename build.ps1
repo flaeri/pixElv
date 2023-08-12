@@ -1,6 +1,5 @@
 $gitHash = git rev-parse HEAD
 $gitTag = git describe --tags --always --dirty
-#$msbuildPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe"
 
 $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
 $vsInstallationPath = & $vswhere -latest -products * -property installationPath
@@ -26,4 +25,4 @@ write-host "`nBuilding...`n"
 Set-Alias msbuild $msbuildPath
 
 # Run msbuild with desired parameters
-& msbuild "PixElv.sln" -property:Configuration=Release -t:rebuild
+& MSBuild PixElv.sln -property:Configuration=Release -t:rebuild
