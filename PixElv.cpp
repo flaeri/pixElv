@@ -450,6 +450,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
 
 static int64_t current_pts = 0; // This should be initialized only once, and then we just increment it
 void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed) {
+    uint8_t* out_planes[2] = { nullptr, nullptr };
     int ret = 0;
 
     uint8_t* inData[4] = { frameData.data, nullptr, nullptr, nullptr };
@@ -462,8 +463,6 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
     frame->height = resources.desc.Height;
 
     if (isCompressed) {
-        // Manual allocation for NV12 format
-        uint8_t* out_planes[2];
         out_planes[0] = (uint8_t*)av_malloc(static_cast<size_t>(resources.desc.Width) * resources.desc.Height);     // Y plane
         out_planes[1] = (uint8_t*)av_malloc(static_cast<size_t>(resources.desc.Width) * resources.desc.Height / 2); // UV plane
 
@@ -551,10 +550,12 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
     av_frame_free(&frame);
     framesWritten++;
 
+    // free stuff
+    if (out_planes[0]) av_freep(&out_planes[0]);
+    if (out_planes[1]) av_freep(&out_planes[1]);
+
     delete[] frameData.data;
     sws_freeContext(swsCtx);
-    //av_free(out_planes[0]);
-    //av_free(out_planes[1]);
 }
 
 void writeFrames(AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {

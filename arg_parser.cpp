@@ -13,12 +13,10 @@ std::vector<Argument> arguments = {
     {"-framerate", "-fps", "-1", " Output FPS. Should match the refresh rate, which is default beahvior"},
     {"-delay", "-dl", "3", " Delay (sec) before starting capture"},
     {"-compression", "-comp", "0", " 1 for compressed (H.264), 0 for RGB24"},
-    {"-bitrate", "-br", "30", " Bitrate (mbps)"},
     {"-frames", "-f", "300", " Frames to capture"},
     {"-duration", "-dur", "", " Duration (sec). If unspecified, uses <frames>"},
     {"-queuelength", "-ql", "-1", " Length/size of queue. How many frames can be buffered before writing. -1 means FPS/2"},
     {"-queuethreshold", "-qt", "-1", " Controls how many frames in the queue before it is swapped to write queue"},
-    {"-safetyoff", "-so", "0", " Disables throttling safety of writer. NO LIMIT on writes buffered to memory. DANGEROUS!"},
 };
 
 std::map<std::string, std::string> parseArgs(int argc, char* argv[]) {
