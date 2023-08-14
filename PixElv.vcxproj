@@ -146,10 +146,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="arg_parser.cpp" />
+    <ClCompile Include="encoder_settings.cpp" />
     <ClCompile Include="PixElv.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="arg_parser.h" />
+    <ClInclude Include="encoder_settings.h" />
     <ClInclude Include="ffmpeg.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

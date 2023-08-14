@@ -22,6 +22,7 @@
 
 //ff
 #include "ffmpeg.hpp"
+#include "encoder_settings.h"
 
 #pragma comment(lib, "d3d11.lib")
 
@@ -723,8 +724,8 @@ int main(int argc, char* argv[]) {
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
 
     // ffmpeg start
-#ifdef DEBUG
-    av_log_set_level(AV_LOG_DEBUG); // This will only execute in Debug builds
+#ifdef _DEBUG
+    av_log_set_level(AV_LOG_DEBUG);
 #endif
 
     //listH264Encoders();
@@ -787,10 +788,12 @@ int main(int argc, char* argv[]) {
     }
 
     if (isCompressed) {
-        av_dict_set(&codec_options, "qp", "16", 0);
-        //av_dict_set(&codec_options, "global_quality", "16", 0);
-
-
+        if (encoderOptions.find(codec->name) != encoderOptions.end()) {
+            auto& options = encoderOptions[codec->name];
+            for (const auto& [key, value] : options) {
+                av_dict_set(&codec_options, key.c_str(), value.c_str(), 0);
+            }
+        }
     }
 
     if (avcodec_open2(codecCtx, codec, &codec_options) < 0) {
