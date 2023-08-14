@@ -370,13 +370,14 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
 void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue, int swapThreshold) {
     int framesCaptured = 0;
     int skippedFrames = 0;
+    int missedFrames = 0;
+    //int totalMiss = 0;
     int totalSkip = 0;
     int queueMaxSize = frameQueue.getMaxSize();
     while (framesCaptured < runFor) {
         if (acquireFrame(resources)) {
             start_timer();
             resources.pContext->CopyResource(resources.pDebugTexture, resources.frame);
-            resources.duplication->ReleaseFrame();
 
             HRESULT hr = resources.pContext->Map(resources.pDebugTexture, 0, D3D11_MAP_READ, 0, &resources.mappedResource);
             if (FAILED(hr)) {
@@ -387,8 +388,10 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
 
             privateCaptureQueue.pushFrame(resources.mappedResource);
             if (resources.frameInfo.AccumulatedFrames >= 2) {
-                std::cout << "missed frames: " << resources.frameInfo.AccumulatedFrames - 1 << std::endl;
+                missedFrames = missedFrames + resources.frameInfo.AccumulatedFrames - 1;
+                std::cout << "missed " << resources.frameInfo.AccumulatedFrames - 1 << " frame(s). Total: " << missedFrames << std::endl;
             }
+
             framesCaptured++;
             if (finished) { return; }
         }
@@ -422,11 +425,13 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
             }()) {
             std::unique_lock<std::shared_mutex> lock(smtx);
             frameQueue.swap(privateCaptureQueue);
-            cv.notify_all(); // notify all waiting threads
+            cv.notify_one(); // notify all waiting threads
         }
         stop_timer(framerate, privateCaptureQueue.size(), frameQueue.size());
+        
+        resources.duplication->ReleaseFrame();
         if (finished) { 
-            return; } //return
+            return; }
     }
 
     // At the end of capturing, if there are any frames left in the private queue, swap them into the shared queue
@@ -436,8 +441,9 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
         frameQueue.swap(privateCaptureQueue);
     }
 
-    int actualFrames = framesCaptured - totalSkip;
+    int actualFrames = framesCaptured - totalSkip - missedFrames;
     std::cout << "\nAttempted frames: " << framesCaptured << std::endl;
+    std::cout << "Total skipped frames: " << missedFrames << std::endl;
     std::cout << "Total skipped frames: " << totalSkip << std::endl;
     std::cout << "Total frames captured: " << actualFrames << std::endl;
 }
@@ -585,17 +591,6 @@ void countdown(int seconds) {
 
 bool generateOutputPath(const std::string& pathArg, bool isCompressed, std::filesystem::path& outputPath) {
     outputPath = pathArg;
-
-    // validate obvious stuff
-    /*if (isCompressed && outputPath.extension() == ".avi") {
-        std::cerr << "Error: Invalid extension '.avi' for compressed output, please use .mp4 or .mov etc.\n";
-        return false;
-    }*/
-
-    /*if (!isCompressed && (outputPath.extension() == ".mp4" || outputPath.extension() == ".mov")) {
-        std::cerr << "Error: Invalid extension '" + outputPath.extension().string() + "' for uncompressed output, please use .avi\n";
-        return false;
-    }*/
 
     // If a path argument is given, use it directly
     if (!pathArg.empty()) {
