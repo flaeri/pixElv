@@ -356,8 +356,8 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
     if (ts > lastPrintedTs) {
         std::cout << "avgMax fGrab (ms): " << maxTime.count() <<
             " TS: " << ts <<
-            " pQueue : " << privateWriterFrameQueue <<  //assuming you want to print the size
-            " sQueue: " << sharedFrameQueue << std::endl; //assuming you want to print the size
+            " pQueue : " << privateWriterFrameQueue <<
+            " sQueue: " << sharedFrameQueue << std::endl;
 
         // Reset maxTime after printing
         maxTime = std::chrono::duration<double, std::milli>(0);
@@ -485,17 +485,29 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
         return;
     }
 
+
     // Create a scaling context
     SwsContext* swsCtx = sws_getContext(
         frame->width, frame->height, AV_PIX_FMT_BGRA,
         frame->width, frame->height, codecCtx->pix_fmt, //AV_PIX_FMT_RGB24 AV_PIX_FMT_BGR24
-        SWS_BILINEAR, nullptr, nullptr, nullptr
+        isCompressed ? SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP : SWS_BILINEAR, nullptr, nullptr, nullptr
     );
 
     if (!swsCtx) {
         std::cerr << "Could not initialize the conversion context";
         av_frame_free(&frame);
         return;
+    }
+
+    if (isCompressed) {
+        sws_setColorspaceDetails(
+            swsCtx,
+            sws_getCoefficients(SWS_CS_ITU601),
+            AVCOL_RANGE_JPEG, // source range: JPEG denotes full range RGB
+            sws_getCoefficients(SWS_CS_ITU601),
+            AVCOL_RANGE_JPEG, // target range: JPEG denotes full range YUV
+            0, 1 << 16, 1 << 16
+        );
     }
 
     // Convert BGRA
@@ -766,7 +778,14 @@ int main(int argc, char* argv[]) {
     codecCtx->height = resources.desc.Height;
     codecCtx->framerate = AVRational{ framerate, 1 };
     codecCtx->time_base = videoStream->time_base;
-    // Add any additional codec settings here, such as bitrate, GOP size, etc.
+
+    //color for compressed
+    if (isCompressed) {
+        codecCtx->colorspace = AVCOL_SPC_BT470BG; // AVCOL_SPC_BT470BG AVCOL_SPC_BT709
+        codecCtx->color_primaries = AVCOL_PRI_BT470BG;
+        codecCtx->color_trc = AVCOL_TRC_SMPTE170M; //AVCOL_TRC_IEC61966_2_1
+        codecCtx->color_range = AVCOL_RANGE_JPEG;
+    }
 
     // If the output format needs global headers, set the flag
     if (outContext->oformat->flags & AVFMT_GLOBALHEADER) {
