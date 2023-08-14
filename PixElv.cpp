@@ -159,7 +159,7 @@ const AVCodec* findSuitableCodec(bool isCompressed) {
 
     if (isCompressed) {
         // Priority for compressed codecs
-        codecs = { "h264_nvenc", "h264_amf", "libx264" };
+        codecs = { "h264_nvenc", "h264_amf", "libx264" }; // "h264_amf", amf explodes currently
     }
     else {
         // Priority for uncompressed codecs. Add more if needed.
@@ -181,6 +181,7 @@ const AVCodec* findSuitableCodec(bool isCompressed) {
             tempCodecCtx->pix_fmt = isCompressed ? AV_PIX_FMT_NV12 : AV_PIX_FMT_BGR24; // Default to common formats
             tempCodecCtx->width = 1920;
             tempCodecCtx->height = 1080;
+            tempCodecCtx->framerate = AVRational{ 60, 1 };
             tempCodecCtx->time_base = AVRational{ 1, 60 }; // 60fps
 
             if (avcodec_open2(tempCodecCtx, codec, nullptr) == 0) {
@@ -522,6 +523,7 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
 
     // Send the frame to the encoder
     ret = avcodec_send_frame(codecCtx, frame);
+
     if (ret < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
         av_strerror(ret, errbuf, sizeof(errbuf));
@@ -729,6 +731,10 @@ int main(int argc, char* argv[]) {
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED | ES_DISPLAY_REQUIRED);
 
     // ffmpeg start
+#ifdef DEBUG
+    av_log_set_level(AV_LOG_DEBUG); // This will only execute in Debug builds
+#endif
+
     //listH264Encoders();
 
     AVFormatContext* outContext = nullptr;
@@ -770,6 +776,7 @@ int main(int argc, char* argv[]) {
     codecCtx->pix_fmt = isCompressed ? AV_PIX_FMT_NV12 : AV_PIX_FMT_BGR24; // AV_PIX_FMT_RGB24 AV_PIX_FMT_BGR24  AV_PIX_FMT_GBRP AV_PIX_FMT_GBRP12LE
     codecCtx->width = resources.desc.Width;
     codecCtx->height = resources.desc.Height;
+    codecCtx->framerate = AVRational{ framerate, 1 };
     codecCtx->time_base = videoStream->time_base;
     // Add any additional codec settings here, such as bitrate, GOP size, etc.
 
@@ -789,6 +796,9 @@ int main(int argc, char* argv[]) {
 
     if (isCompressed) {
         av_dict_set(&codec_options, "qp", "16", 0);
+        //av_dict_set(&codec_options, "global_quality", "16", 0);
+
+
     }
 
     if (avcodec_open2(codecCtx, codec, &codec_options) < 0) {
