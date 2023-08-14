@@ -368,6 +368,8 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
 }
 
 void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue, int swapThreshold) {
+    int baselineAccumulatedFrames = 0;
+    bool isFirstRealCapture = true;
     int framesCaptured = 0;
     int skippedFrames = 0;
     int missedFrames = 0;
@@ -387,6 +389,12 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
             resources.pContext->Unmap(resources.pDebugTexture, 0);
 
             privateCaptureQueue.pushFrame(resources.mappedResource);
+
+            if (isFirstRealCapture) {
+                missedFrames = -(int)resources.frameInfo.AccumulatedFrames + 1;
+                isFirstRealCapture = false;
+            }
+
             if (resources.frameInfo.AccumulatedFrames >= 2) {
                 missedFrames = missedFrames + resources.frameInfo.AccumulatedFrames - 1;
                 std::cout << "missed " << resources.frameInfo.AccumulatedFrames - 1 << " frame(s). Total: " << missedFrames << std::endl;
