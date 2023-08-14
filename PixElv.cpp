@@ -1,5 +1,4 @@
 #include "arg_parser.h"
-
 #include <d3d11.h>
 #include <dxgi1_4.h>
 #include <dxgi.h>
@@ -9,8 +8,6 @@
 #include <chrono>
 #include <thread>
 #include <queue>
-#include <future>
-#include <mfidl.h>
 #include <vector>
 #include <string>
 #include <cstring> // for params
@@ -338,11 +335,6 @@ bool acquireFrame(DxgiResources& resources) {
 int lastPrintedTs = -1;
 int framesWritten = 0;
 
-bool isFirstSample = true;
-
-LONGLONG llOutputSampleTime{};
-LONGLONG llOutputSampleDuration{};
-
 std::chrono::duration<double, std::milli> maxTime(0); // variable to keep track of the maximum time
 std::chrono::high_resolution_clock::time_point startTime; // variable to keep track of the start time
 
@@ -358,7 +350,7 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
     // If the elapsed time is greater than the maximum time, update maxTime
     if (elapsedTime > maxTime) { maxTime = elapsedTime; }
 
-    // If frames is a multiple of 60, print maxTime
+    // If frames is a multiple of fr, print maxTime
     int ts = framesWritten / framerate;
     if (ts > lastPrintedTs) {
         std::cout << "avgMax fGrab (ms): " << maxTime.count() <<
