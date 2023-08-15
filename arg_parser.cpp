@@ -17,6 +17,7 @@ std::vector<Argument> arguments = {
     {"-duration", "-dur", "", " Duration (sec). If unspecified, uses <frames>"},
     {"-queuelength", "-ql", "-1", " Length/size of queue. How many frames can be buffered before writing. -1 means FPS/2"},
     {"-queuethreshold", "-qt", "-1", " Controls how many frames in the queue before it is swapped to write queue"},
+    {"-vfr", "-vfr", "0", " Enable variable framerate path"},
 };
 
 std::map<std::string, std::string> parseArgs(int argc, char* argv[]) {

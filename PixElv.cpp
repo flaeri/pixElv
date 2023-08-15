@@ -67,6 +67,7 @@ struct FrameData {
     unsigned int rowPitch;
     unsigned int depthPitch;
     unsigned char* data;  // The actual frame data, copied from GPU memory
+    LONGLONG interval;  // Store interval in QPC units between this frame and the previous
 };
 
 class FrameQueue {
@@ -81,7 +82,7 @@ public:
         return queue.size() >= max_size;
     }
 
-    void pushFrame(const D3D11_MAPPED_SUBRESOURCE& frameData) {
+    void pushFrame(const D3D11_MAPPED_SUBRESOURCE& frameData, LONGLONG interval) {
         // Create a new buffer and copy the frame data into it
         unsigned char* buffer = new unsigned char[frameData.DepthPitch];
         memcpy(buffer, frameData.pData, frameData.DepthPitch);
@@ -91,6 +92,7 @@ public:
         fd.rowPitch = frameData.RowPitch;
         fd.depthPitch = frameData.DepthPitch;
         fd.data = buffer;
+        fd.interval = interval;
 
         // Add the buffer to the queue
         queue.push(fd);
@@ -137,6 +139,8 @@ struct DxgiResources {
     ID3D11Texture2D* pDebugTexture;
     D3D11_MAPPED_SUBRESOURCE mappedResource;
     UINT refreshRate;
+    LARGE_INTEGER qpcFreq;
+    LARGE_INTEGER lastPTS;
 };
 
 void listH264Encoders() {
@@ -157,7 +161,7 @@ const AVCodec* findSuitableCodec(bool isCompressed) {
 
     if (isCompressed) {
         // Priority for compressed codecs
-        codecs = { "h264_nvenc", "h264_amf", "libx264" }; // "h264_amf", amf explodes currently
+        codecs = { "h264_nvenc", "h264_amf", "libx264" };
     }
     else {
         // Priority for uncompressed codecs. Add more if needed.
@@ -267,7 +271,6 @@ DxgiResources initializeDxgi(int monitorIndex) {
     hr = output1->GetDisplayModeList1(resources.desc.Format, flags, &numModes, displayModes);
     CHECK_HR(hr);
 
-    // Query IDXGIOutput2 or IDXGIOutput3 interface
     IDXGIOutput3* output3 = NULL;
     hr = output->QueryInterface(__uuidof(IDXGIOutput3), (void**)&output3);
     CHECK_HR(hr);
@@ -367,18 +370,27 @@ void stop_timer(int framerate, int privateWriterFrameQueue, int sharedFrameQueue
     }
 }
 
+int framesCaptured = 0;
+int skippedFrames = 0;
+int missedFrames = 0;
+int totalSkip = 0;
+bool isFirstRealCapture = true;
 void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue, int swapThreshold) {
-    int baselineAccumulatedFrames = 0;
-    bool isFirstRealCapture = true;
-    int framesCaptured = 0;
-    int skippedFrames = 0;
-    int missedFrames = 0;
-    //int totalMiss = 0;
-    int totalSkip = 0;
+    QueryPerformanceFrequency(&resources.qpcFreq);
+
     int queueMaxSize = frameQueue.getMaxSize();
     while (framesCaptured < runFor) {
         if (acquireFrame(resources)) {
             start_timer();
+
+            LARGE_INTEGER currentPTS = resources.frameInfo.LastPresentTime;
+            LONGLONG interval = 0;
+
+            if (resources.lastPTS.QuadPart != 0) {  // Avoid the first iteration where lastPTS is not yet set
+                interval = currentPTS.QuadPart - resources.lastPTS.QuadPart;
+            }
+            resources.lastPTS = currentPTS;
+
             resources.pContext->CopyResource(resources.pDebugTexture, resources.frame);
 
             HRESULT hr = resources.pContext->Map(resources.pDebugTexture, 0, D3D11_MAP_READ, 0, &resources.mappedResource);
@@ -388,7 +400,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
 
             resources.pContext->Unmap(resources.pDebugTexture, 0);
 
-            privateCaptureQueue.pushFrame(resources.mappedResource);
+            privateCaptureQueue.pushFrame(resources.mappedResource, interval);
 
             if (isFirstRealCapture) {
                 missedFrames = -(int)resources.frameInfo.AccumulatedFrames + 1;
@@ -433,7 +445,7 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
             }()) {
             std::unique_lock<std::shared_mutex> lock(smtx);
             frameQueue.swap(privateCaptureQueue);
-            cv.notify_one(); // notify all waiting threads
+            cv.notify_one();
         }
         stop_timer(framerate, privateCaptureQueue.size(), frameQueue.size());
         
@@ -448,15 +460,21 @@ void captureFrames(DxgiResources& resources, int runFor, int framerate, FrameQue
         std::unique_lock<std::shared_mutex> lock(smtx);
         frameQueue.swap(privateCaptureQueue);
     }
-
-    int actualFrames = framesCaptured - totalSkip - missedFrames;
-    std::cout << "\nAttempted frames: " << framesCaptured << std::endl;
-    std::cout << "Total skipped frames: " << missedFrames << std::endl;
-    std::cout << "Total skipped frames: " << totalSkip << std::endl;
-    std::cout << "Total frames captured: " << actualFrames << std::endl;
 }
 
-static int64_t current_pts = 0; // This should be initialized only once, and then we just increment it
+static int64_t current_pts = 0;
+const int cfr_pts_increment = 0;
+int totalDupes = 0;
+
+int computeRoundedIncrement(LONGLONG interval, AVRational time_base, LONGLONG qpcFreq, int cfr_pts_increment) {
+    int64_t intermediate_result = static_cast<int64_t>(interval) * time_base.den;
+    int raw_increment = static_cast<int>(intermediate_result / qpcFreq);
+
+    int ratio = static_cast<int>(std::round(static_cast<double>(raw_increment) / cfr_pts_increment));
+
+    return ratio * cfr_pts_increment;
+}
+
 void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed) {
     uint8_t* out_planes[2] = { nullptr, nullptr };
     int ret = 0;
@@ -480,10 +498,12 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
         frame->linesize[1] = resources.desc.Width; // NV12 UV plane has the same width but half the height
     }
 
-    int pts_increment = videoStream->time_base.den / videoStream->avg_frame_rate.num;
     frame->pts = current_pts;
-    current_pts += pts_increment;
-    frame->pkt_duration = pts_increment;
+    frame->pkt_duration = cfr_pts_increment;
+
+#ifdef _DEBUG
+    std::cout << "frame: " << framesWritten << " | pts: " << frame->pts << " | dur: " << frame->pkt_duration << std::endl;
+#endif // DEBUG
 
     if (av_frame_get_buffer(frame, 0) < 0) {
         char errbuf[AV_ERROR_MAX_STRING_SIZE];
@@ -493,13 +513,11 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
         return;
     }
 
-
     // Create a scaling context
     SwsContext* swsCtx = sws_getContext(
         frame->width, frame->height, AV_PIX_FMT_BGRA,
         frame->width, frame->height, codecCtx->pix_fmt, //AV_PIX_FMT_RGB24 AV_PIX_FMT_BGR24
-        isCompressed ? SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP : SWS_BILINEAR, nullptr, nullptr, nullptr
-    );
+        isCompressed ? SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT | SWS_FULL_CHR_H_INP : SWS_BILINEAR, nullptr, nullptr, nullptr);
 
     if (!swsCtx) {
         std::cerr << "Could not initialize the conversion context";
@@ -519,12 +537,10 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
     }
 
     // Convert BGRA
-    sws_scale(
-        swsCtx,
+    sws_scale(swsCtx,
         inData, inLinesize,
         0, frame->height,
-        frame->data, frame->linesize
-    );
+        frame->data, frame->linesize);
 
     // Initialize packet
     AVPacket pkt = { 0 };
@@ -532,11 +548,6 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
     //check frame
     if (!frame || !frame->data[0]) {
         std::cerr << "Frame is not correctly initialized!";
-        return;
-    }
-
-    if (!codecCtx) {
-        std::cerr << "Codec context is null." << std::endl;
         return;
     }
 
@@ -549,7 +560,6 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
         std::cerr << "Error sending frame to encoder: " << errbuf << std::endl;
         return;
     }
-
 
     // Receive packets from the encoder and write them to the output file
     while (ret >= 0) {
@@ -567,28 +577,53 @@ void writeFrameToDisk(FrameData frameData, AVFormatContext* outContext, AVStream
         av_packet_unref(&pkt);
     }
 
-    // Free the frame when you're done
-    av_frame_free(&frame);
     framesWritten++;
 
     // free stuff
+    av_frame_free(&frame);
     if (out_planes[0]) av_freep(&out_planes[0]);
     if (out_planes[1]) av_freep(&out_planes[1]);
 
-    delete[] frameData.data;
     sws_freeContext(swsCtx);
 }
 
-void writeFrames(AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
+void writeFrames(AVFormatContext* outContext, AVStream* videoStream, AVCodecContext* codecCtx, DxgiResources& resources, uint64_t framerate, bool isCompressed, bool isVFR, FrameQueue& frameQueue, FrameQueue& privateCaptureQueue) {
+    int cfr_pts_increment = static_cast<int>(videoStream->time_base.den / static_cast<int>(framerate));
     while (!finished || !frameQueue.empty()) {
         std::unique_lock<std::shared_mutex> lock(smtx);
         cv.wait_for(lock, threadTimeout, [&frameQueue] {return finished || !frameQueue.empty(); });
         while (!frameQueue.empty()) {
-            FrameData frameData = frameQueue.popFrame();
-            lock.unlock(); // unlock the mutex while writing the frame to disk
-            writeFrameToDisk(frameData, outContext, videoStream, codecCtx, resources, framerate, isCompressed);
+            FrameData frameData1 = frameQueue.popFrame();
+            lock.unlock(); // unlock the mutex while writing the frames to disk
+
+            if (!isVFR) {
+                // Calculate individual PTS increments and round them
+                int rounded_pts_increment1 = computeRoundedIncrement(frameData1.interval, videoStream->time_base, resources.qpcFreq.QuadPart, cfr_pts_increment);
+
+                // Use rounded PTS increments to calculate the total PTS increment
+                int duplication_count = rounded_pts_increment1 / cfr_pts_increment - 1;
+
+                if (duplication_count >= 1) {
+                    totalDupes = totalDupes + duplication_count;
+                    std::cerr << "inserting " << duplication_count << " dupes at PTS: " << current_pts << std::endl;
+                }
+
+                for (int i = 0; i <= duplication_count; i++) {
+                    writeFrameToDisk(frameData1, outContext, videoStream, codecCtx, resources, framerate, isCompressed);
+                    current_pts += cfr_pts_increment;
+                }
+            } else {
+                // Convert frameData.interval from QPC units to the timebase of the video stream
+                int64_t pts_increment = (frameData1.interval * videoStream->time_base.den) / resources.qpcFreq.QuadPart;
+                writeFrameToDisk(frameData1, outContext, videoStream, codecCtx, resources, framerate, isCompressed);
+                current_pts += pts_increment;
+            }
+
+            // Free the memory of frameData1 once it's written and dupes are done
+            delete[] frameData1.data;
+            
             lock.lock(); // reacquire the lock before the next iteration
-            if (finished) { 
+            if (finished) {
                 std::cout << "finishing writes, frames remaining: " << frameQueue.size() << std::endl;
                 if (frameQueue.empty()) { return; }
             }
@@ -663,6 +698,7 @@ int main(int argc, char* argv[]) {
     int bitrate = getArgAsInt(arguments, "-bitrate", 30);
     int queueLengthParam = getArgAsInt(arguments, "-queuelength"); //frames in the queue
     int swapSizeParam = getArgAsInt(arguments, "-queuethreshold"); //queue fullness when swap
+    bool isVFR = arguments.count("-vfr") > 0 ? std::atoi(arguments["-vfr"].c_str()) > 0 : false; // h264 vs raw RGB24
 
     //std::string crop = arguments.count("-crop") > 0 ? arguments["-crop"] : "default_crop"; // unused ATM
     
@@ -671,8 +707,10 @@ int main(int argc, char* argv[]) {
     std::cout << "\nDelay active. Starting in:" << std::endl;
     countdown(delay);
 
-    // start work, DXGI. Has to be after countdown, due to context switch can happen during prepp.
+    // start work, DXGI. Has to be after countdown, due to context switch can happen
     DxgiResources resources = initializeDxgi(monitor);
+    resources.qpcFreq = { 0 };
+    resources.lastPTS = { 0 };
 
     //framerate and queues
     if (framerate == -1) {
@@ -731,6 +769,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Framerate: " << framerate << std::endl;
     std::cout << "Queue size (frames): " << maxQueueLength << " | Swaps @ " << swapThreshold << " frames" << std::endl;
     std::cout << "Compression: " << (isCompressed ? "TRUE" : "FALSE") << std::endl;
+    std::cout << "VFR: " << (isVFR ? "TRUE" : "FALSE") << std::endl;
 
     std::cout << "\nHit ctrl+c to break early:" << std::endl;
     std::wcout << "\nWriting output to: " << outputFilePath.wstring() << std::endl;
@@ -773,7 +812,7 @@ int main(int argc, char* argv[]) {
     const int pts_increment = videoStream->time_base.den / framerate;
     videoStream->avg_frame_rate = AVRational{ framerate, 1 };
 
-    // 2. Allocate the codec context
+    //Allocate the codec context
     AVCodecContext* codecCtx = avcodec_alloc_context3(codec);
     if (!codecCtx) {
         std::cerr << "Failed to allocate codec context!";
@@ -800,7 +839,7 @@ int main(int argc, char* argv[]) {
         codecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     }
 
-    // 4. Open the codec
+    //Open the codec
     AVDictionary* codec_options = nullptr;
     av_dict_set(&codec_options, "bf", "0", 0);
     
@@ -862,7 +901,7 @@ int main(int argc, char* argv[]) {
 
     // spawn worker threads
     std::thread captureThread(captureFrames, std::ref(resources), runFor, framerate, std::ref(frameQueue), std::ref(privateCaptureQueue), swapThreshold);
-    std::thread writeThread(writeFrames, outContext, videoStream, codecCtx, std::ref(resources), framerate, isCompressed, std::ref(frameQueue), std::ref(privateCaptureQueue));
+    std::thread writeThread(writeFrames, outContext, videoStream, codecCtx, std::ref(resources), framerate, isCompressed, isVFR, std::ref(frameQueue), std::ref(privateCaptureQueue));
     
     captureThread.join(); // rounds up the cap thread (stop)
     std::cout << "Capture ended!\n ------" << std::endl;
@@ -883,10 +922,14 @@ int main(int argc, char* argv[]) {
     }
     avformat_free_context(outContext);
 
-
-    //std::cout << "Timeouts: " << timeOutCounter << std::endl;
-    std::cout << "\nFrames written: " << framesWritten << std::endl;
+    int actualFrames = framesCaptured - totalSkip - missedFrames;
+    std::cout << "\n--- Stats ---" << std::endl;
     std::cout << "Frames requested: " << runFor << std::endl;
+    std::cout << "Attempted frames: " << framesCaptured << std::endl;
+    std::cout << "Total frames missed : " << missedFrames << " | skipped : " << totalSkip << std::endl;
+    std::cout << "Total frames captured: " << actualFrames << std::endl;
+    std::cout << "Unique written : " << framesWritten - totalDupes << std::endl;
+    std::cout << "Frames written: " << framesWritten << " | Duplicates: " << totalDupes << std::endl;
     std::cout << "\nDone! :)" << std::endl;
 
     // Release ME!
