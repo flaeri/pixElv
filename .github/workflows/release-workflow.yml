@@ -12,6 +12,14 @@ jobs:
       - name: 'Checkout'
         uses: actions/checkout@v3
 
+      - name: Download FFmpeg Dependencies
+        run: |
+          curl -L -o pixElv-deps.7z https://otterbro.com/pixElv-deps.7z
+
+      - name: Extract FFmpeg Dependencies
+        run: |
+          7z x .\pixElv-deps.7z -o"./deps/"
+
       - name: Run Build Script
         run: |
           pwsh -File Build.ps1
@@ -21,6 +29,10 @@ jobs:
 
       - name: Test Raw
         run: ./x64/Release/PixElv.exe -delay 0 -comp 0 -frames 2
+
+      - name: Copy DLLs to Release directory
+        run: |
+          copy-item -path .\deps\bin\*.dll -Destination .\x64\Release\ -force
 
       - name: Check if prerelease
         id: prerelease
@@ -38,7 +50,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $tag = $tag.Replace(".", "_")
-          Compress-Archive -Path ./x64/Release/PixElv.exe -DestinationPath "./PixElv-$tag.zip"
+          Compress-Archive -Path "./x64/Release/*" -DestinationPath "./PixElv-$tag.zip"
           echo "::set-output name=formatted_tag::$tag"
         shell: pwsh
 
